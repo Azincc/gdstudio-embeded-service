@@ -33,37 +33,11 @@ services:
       retries: 3
     restart: unless-stopped
 
-  api:
-    build:
-      context: .
-      target: api
-    container_name: embed-api
+  embed-service:
+    build: .
+    container_name: embed-service
     ports:
       - "8080:8080"
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgres://embed:embed_pass@postgres:5432/embed_service?sslmode=disable
-      - GD_API_BASE=https://music-api.gdstudio.xyz
-      - NAVIDROME_BASE_URL=${NAVIDROME_BASE_URL:-http://host.docker.internal:4533}
-      - NAVIDROME_USER=${NAVIDROME_USER:-admin}
-      - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD:-admin}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-    volumes:
-      # 请修改为你的实际路径
-      - ${NAVIDROME_MUSIC_DIR:-/tmp/music}:/music:rw
-      - ${WORK_DIR:-/tmp/embed-work}:/work:rw
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: .
-      target: worker
-    container_name: embed-worker
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgres://embed:embed_pass@postgres:5432/embed_service?sslmode=disable
@@ -84,8 +58,6 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-    deploy:
-      replicas: 2  # 可水平扩展 worker 数量
 
   # 可选：asynq 任务队列监控 UI
   asynqmon:

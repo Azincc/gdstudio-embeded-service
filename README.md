@@ -1,9 +1,10 @@
 # GDStudio 嵌入式下载微服务
 
 [![Docker Publish](https://github.com/Azincc/gdstudio-embeded-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Azincc/gdstudio-embeded-service/actions/workflows/docker-publish.yml)
-[![Multi-Service Build](https://github.com/Azincc/gdstudio-embeded-service/actions/workflows/docker-multi-service.yml/badge.svg)](https://github.com/Azincc/gdstudio-embeded-service/actions/workflows/docker-multi-service.yml)
 
 基于 Go 的音乐下载与元数据刮削服务，为 Navidrome 提供已刮削的音频文件。
+
+**统一服务架构** - API 和 Worker 在同一容器中运行，简化部署。
 
 ## 功能特性
 
@@ -14,6 +15,7 @@
 - 🎯 幂等性保证（避免重复下载）
 - 📊 Prometheus 指标监控
 - 🐳 Docker 容器化部署
+- ⚡ 统一服务架构（API + Worker 一体化）
 
 ## 技术栈
 
@@ -96,17 +98,18 @@ go run cmd/worker/main.go
 cp .env.example .env
 # 编辑 .env 填入配置
 
-# 2. 启动服务
+# 2. 启动服务（API 和 Worker 在同一容器中）
 docker-compose up -d
 
 # 3. 查看日志
-docker-compose logs -f api worker
+docker-compose logs -f embed-service
 
-# 4. 扩展 Worker
-docker-compose up -d --scale worker=5
+# 4. 检查健康状态
+curl http://localhost:8080/healthz
 ```
 
 📖 **完整部署指南**: [DOCKER_DEPLOYMENT.md](./DOCKER_DEPLOYMENT.md)
+📖 **架构说明**: [SERVICE_MERGE.md](./SERVICE_MERGE.md)
 
 ## 项目结构
 
@@ -236,9 +239,9 @@ LOG_LEVEL=info
 
 所有镜像自动发布到 GitHub Container Registry:
 
-- **完整镜像**: `ghcr.io/azincc/gdstudio-embeded-service:latest`
-- **API 镜像**: `ghcr.io/azincc/gdstudio-embeded-service-api:latest`
-- **Worker 镜像**: `ghcr.io/azincc/gdstudio-embeded-service-worker:latest`
+- **统一镜像**: `ghcr.io/azincc/gdstudio-embeded-service:latest`
+  - 包含 API 和 Worker
+  - 一个容器同时运行两个服务
 
 支持架构: `linux/amd64`, `linux/arm64`
 
@@ -248,6 +251,7 @@ MIT
 
 ## 相关文档
 
+- **架构说明**: [SERVICE_MERGE.md](./SERVICE_MERGE.md) - API + Worker 统一服务架构
 - **部署指南**: [DOCKER_DEPLOYMENT.md](./DOCKER_DEPLOYMENT.md) - Docker 部署完整指南
 - **测试文档**: [TESTING.md](./TESTING.md) - 功能测试指南
 - **快速开始**: [QUICKSTART.md](./QUICKSTART.md) - 5 分钟快速上手
