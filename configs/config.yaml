@@ -1,0 +1,78 @@
+server:
+  port: 8080
+  mode: release  # debug / release
+
+gdstudio:
+  base_url: https://music-api.gdstudio.xyz
+  mirrors:
+    cn: https://music-api-cn.gdstudio.xyz
+    hk: https://music-api-hk.gdstudio.xyz
+    us: https://music-api-us.gdstudio.xyz
+  timeout: 15s
+  retry_count: 2
+
+navidrome:
+  base_url: http://localhost:4533
+  username: admin
+  password: admin  # 建议使用环境变量
+  api_version: 1.16.1
+  scan_timeout: 300s
+
+storage:
+  work_dir: /work/tmp
+  music_dir: /music/library
+  path_template: "{artist}/{album}/{trackNo:02d} - {title}.{ext}"
+  allowed_extensions:
+    - mp3
+    - flac
+    - m4a
+
+worker:
+  max_concurrent: 3
+  download_timeout: 600s
+  tag_write_timeout: 30s
+  move_timeout: 10s
+  scan_timeout: 300s
+  retry_max_attempts: 3
+  retry_delay: 10s
+
+database:
+  driver: postgres  # sqlite / postgres
+  dsn: "postgres://embed:embed_pass@localhost:5432/embed_service?sslmode=disable"
+  # SQLite 配置示例：
+  # driver: sqlite
+  # dsn: "file:embed.db?cache=shared&mode=rwc"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: 3600s
+
+redis:
+  url: redis://localhost:6379
+  db: 0
+  max_retries: 3
+
+security:
+  api_keys:
+    - key: "dev-api-key-please-change-in-production"
+      name: "echo-client"
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+  allowed_download_hosts:
+    - "*.163.com"
+    - "*.kuwo.cn"
+    - "*.gdstudio.xyz"
+    - "*.qq.com"
+    - "*.kugou.com"
+    - "*.migu.cn"
+
+logging:
+  level: info  # debug / info / warn / error
+  format: json  # json / console
+  output: stdout  # stdout / file
+  file_path: /var/log/embed-service.log
+
+metrics:
+  enabled: true
+  port: 9091
+  path: /metrics

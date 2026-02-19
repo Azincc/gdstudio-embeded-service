@@ -1,0 +1,49 @@
+# 编译产物
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试覆盖率
+*.test
+*.out
+coverage.out
+
+# 依赖目录
+vendor/
+
+# Go workspace file
+go.work
+
+# 环境变量文件
+.env
+.env.local
+
+# 日志文件
+*.log
+
+# 临时文件
+/work/
+/tmp/
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# 数据库文件
+*.db
+*.db-shm
+*.db-wal
+
+# Python (如果有脚本)
+__pycache__/
+*.py[cod]
+*$py.class
