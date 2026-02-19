@@ -282,8 +282,8 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 // Health 健康检查
 func (h *JobHandler) Health(c *gin.Context) {
 	// 检查数据库
-	var count int64
-	if err := h.repo.CountByStatus(model.JobStatusQueued); err != nil {
+	count, err := h.repo.CountByStatus(model.JobStatusQueued)
+	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"status": "unhealthy",
 			"error":  "database connection failed",

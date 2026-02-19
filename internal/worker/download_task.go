@@ -172,13 +172,10 @@ func (t *DownloadTask) stageDownload(ctx context.Context, payload *DownloadPaylo
 		return fmt.Errorf("failed to create work dir: %w", err)
 	}
 
-	// 确定文件扩展名
-	ext := t.gdClient.ResolveURL // 这里应该从之前保存的结果获取
-	// 简化：从 URL 推断
+	// 确定文件扩展名（简化：从 URL 推断）
+	ext := ".mp3"
 	if strings.Contains(downloadURL, ".flac") {
 		ext = ".flac"
-	} else {
-		ext = ".mp3"
 	}
 
 	tempFilePath := filepath.Join(workDir, "audio"+ext)
