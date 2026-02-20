@@ -128,7 +128,7 @@ docker pull ghcr.io/azincc/gdstudio-embeded-service:latest
 docker run -d \
   --name embed-service \
   -p 8080:8080 \
-  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_URL=redis:6379 \
   -e DATABASE_URL=postgres://user:pass@postgres:5432/db \
   -e NAVIDROME_BASE_URL=http://navidrome:4533 \
   -e NAVIDROME_USER=admin \

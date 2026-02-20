@@ -194,7 +194,7 @@ worker:
 
 ```bash
 # Redis
-REDIS_URL=redis://localhost:6379
+REDIS_URL=localhost:6379
 
 # 数据库
 DATABASE_URL=postgres://user:pass@localhost:5432/embed_service
@@ -209,7 +209,7 @@ NAVIDROME_TOKEN=your-token
 
 # Worker 配置
 MAX_CONCURRENT_JOBS=3
-DOWNLOAD_TIMEOUT=600
+DOWNLOAD_TIMEOUT=600s
 LOG_LEVEL=info
 ```
 

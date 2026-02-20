@@ -7,10 +7,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: embed-redis
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     volumes:
-      - redis-data:/data
+      - ${WORK_ROOT}/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -26,11 +26,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-embed}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-embed_pass}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+      - ${WORK_ROOT}/postgres:/var/lib/postgresql/data
+    expose:
+      - "5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-embed}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-embed} -d ${POSTGRES_DB:-embed_service}"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -40,9 +40,9 @@ services:
     image: ghcr.io/azincc/gdstudio-embeded-service:latest
     container_name: embed-service
     ports:
-      - "8080:8080"
+      - "5434:8080"
     environment:
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis:6379
       - DATABASE_URL=postgres://${POSTGRES_USER:-embed}:${POSTGRES_PASSWORD:-embed_pass}@postgres:5432/${POSTGRES_DB:-embed_service}?sslmode=disable
       - GD_API_BASE=https://music-api.gdstudio.xyz
       - NAVIDROME_BASE_URL=${NAVIDROME_BASE_URL}
@@ -50,12 +50,12 @@ services:
       - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD}
       - API_KEY=${API_KEY:-dev-api-key-please-change-in-production}
       - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-3}
-      - DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-600}
+      - DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-600s}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - TZ=Asia/Shanghai
     volumes:
       - ${NAVIDROME_MUSIC_DIR}:/music:rw
-      - ${WORK_DIR:-./work}:/work:rw
+      - ${WORK_ROOT}/work:/work:rw
     depends_on:
       redis:
         condition: service_healthy
@@ -74,7 +74,3 @@ services:
     depends_on:
       - redis
     restart: unless-stopped
-
-volumes:
-  redis-data:
-  postgres-data:

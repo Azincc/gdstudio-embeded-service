@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -42,10 +45,10 @@ type NavidromeConfig struct {
 }
 
 type StorageConfig struct {
-	WorkDir            string   `mapstructure:"work_dir"`
-	MusicDir           string   `mapstructure:"music_dir"`
-	PathTemplate       string   `mapstructure:"path_template"`
-	AllowedExtensions  []string `mapstructure:"allowed_extensions"`
+	WorkDir           string   `mapstructure:"work_dir"`
+	MusicDir          string   `mapstructure:"music_dir"`
+	PathTemplate      string   `mapstructure:"path_template"`
+	AllowedExtensions []string `mapstructure:"allowed_extensions"`
 }
 
 type WorkerConfig struct {
@@ -73,7 +76,7 @@ type RedisConfig struct {
 }
 
 type SecurityConfig struct {
-	APIKeys              []APIKey `mapstructure:"api_keys"`
+	APIKeys              []APIKey  `mapstructure:"api_keys"`
 	RateLimit            RateLimit `mapstructure:"rate_limit"`
 	AllowedDownloadHosts []string  `mapstructure:"allowed_download_hosts"`
 }
@@ -84,8 +87,8 @@ type APIKey struct {
 }
 
 type RateLimit struct {
-	Enabled             bool `mapstructure:"enabled"`
-	RequestsPerMinute   int  `mapstructure:"requests_per_minute"`
+	Enabled           bool `mapstructure:"enabled"`
+	RequestsPerMinute int  `mapstructure:"requests_per_minute"`
 }
 
 type LoggingConfig struct {
@@ -135,6 +138,18 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
 
+	// 兼容纯数字秒值（例如 DOWNLOAD_TIMEOUT=600）
+	normalizeDurationValues(v, []string{
+		"gdstudio.timeout",
+		"navidrome.scan_timeout",
+		"worker.download_timeout",
+		"worker.tag_write_timeout",
+		"worker.move_timeout",
+		"worker.scan_timeout",
+		"worker.retry_delay",
+		"database.conn_max_lifetime",
+	})
+
 	// 解析配置
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -143,6 +158,11 @@ func Load(configPath string) (*Config, error) {
 
 	// 应用默认值
 	setDefaults(&cfg)
+
+	// 兼容 REDIS_URL 同时支持 host:port 与 redis://host:port/db
+	if err := normalizeRedisAddress(&cfg.Redis); err != nil {
+		return nil, fmt.Errorf("failed to parse redis config: %w", err)
+	}
 
 	return &cfg, nil
 }
@@ -175,4 +195,72 @@ func setDefaults(cfg *Config) {
 	if cfg.Logging.Output == "" {
 		cfg.Logging.Output = "stdout"
 	}
+}
+
+func normalizeDurationValues(v *viper.Viper, keys []string) {
+	for _, key := range keys {
+		raw := strings.TrimSpace(v.GetString(key))
+		if raw == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(raw); err == nil {
+			continue
+		}
+		if isDigits(raw) {
+			v.Set(key, raw+"s")
+		}
+	}
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func normalizeRedisAddress(redisCfg *RedisConfig) error {
+	raw := strings.TrimSpace(redisCfg.URL)
+	if raw == "" {
+		return nil
+	}
+
+	// asynq 的 Addr 需要 host:port；若已经是该格式则直接使用
+	if !strings.Contains(raw, "://") {
+		redisCfg.URL = raw
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid REDIS_URL %q: %w", raw, err)
+	}
+
+	if u.Scheme != "redis" && u.Scheme != "rediss" {
+		return fmt.Errorf("unsupported REDIS_URL scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid REDIS_URL %q: missing host", raw)
+	}
+
+	redisCfg.URL = u.Host
+
+	// 若未单独配置 DB，则尝试从 /<db> 提取
+	if redisCfg.DB != 0 {
+		return nil
+	}
+	path := strings.Trim(u.Path, "/")
+	if path == "" {
+		return nil
+	}
+
+	db, err := strconv.Atoi(path)
+	if err != nil || db < 0 {
+		return fmt.Errorf("invalid REDIS_URL database index %q", path)
+	}
+	redisCfg.DB = db
+
+	return nil
 }

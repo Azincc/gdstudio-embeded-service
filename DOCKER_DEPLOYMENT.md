@@ -123,7 +123,7 @@ API_KEY=your-secure-api-key-change-this
 # Worker 配置
 WORKER_REPLICAS=2
 MAX_CONCURRENT_JOBS=3
-DOWNLOAD_TIMEOUT=600
+DOWNLOAD_TIMEOUT=600s
 
 # 日志级别
 LOG_LEVEL=info
@@ -150,7 +150,7 @@ docker pull ghcr.io/azincc/gdstudio-embeded-service-worker:latest
 docker run -d \
   --name embed-api \
   -p 8080:8080 \
-  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_URL=redis:6379 \
   -e DATABASE_URL=postgres://user:pass@postgres:5432/db \
   -e NAVIDROME_BASE_URL=http://navidrome:4533 \
   -e NAVIDROME_USER=admin \
@@ -162,7 +162,7 @@ docker run -d \
 # 运行 Worker
 docker run -d \
   --name embed-worker \
-  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_URL=redis:6379 \
   -e DATABASE_URL=postgres://user:pass@postgres:5432/db \
   -e NAVIDROME_BASE_URL=http://navidrome:4533 \
   -e NAVIDROME_USER=admin \

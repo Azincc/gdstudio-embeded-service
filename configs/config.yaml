@@ -47,7 +47,7 @@ database:
   conn_max_lifetime: 3600s
 
 redis:
-  url: redis://localhost:6379
+  url: localhost:6379
   db: 0
   max_retries: 3
 

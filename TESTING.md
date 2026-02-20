@@ -26,7 +26,7 @@ NAVIDROME_BASE_URL=http://localhost:4533
 NAVIDROME_USER=admin
 NAVIDROME_PASSWORD=admin
 DATABASE_URL=postgres://embed:embed_pass@localhost:5432/embed_service?sslmode=disable
-REDIS_URL=redis://localhost:6379
+REDIS_URL=localhost:6379
 LOG_LEVEL=debug
 EOF
 ```
