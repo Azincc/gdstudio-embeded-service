@@ -159,6 +159,9 @@ func Load(configPath string) (*Config, error) {
 	// 应用默认值
 	setDefaults(&cfg)
 
+	// 从环境变量覆盖首个 API Key，便于 Docker Compose 从 .env 注入。
+	applyAPIKeyOverride(v, &cfg)
+
 	// 兼容 REDIS_URL 同时支持 host:port 与 redis://host:port/db
 	if err := normalizeRedisAddress(&cfg.Redis); err != nil {
 		return nil, fmt.Errorf("failed to parse redis config: %w", err)
@@ -194,6 +197,34 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Logging.Output == "" {
 		cfg.Logging.Output = "stdout"
+	}
+}
+
+func applyAPIKeyOverride(v *viper.Viper, cfg *Config) {
+	apiKey := strings.TrimSpace(v.GetString("API_KEY"))
+	if apiKey == "" {
+		return
+	}
+
+	keyName := strings.TrimSpace(v.GetString("API_KEY_NAME"))
+	if keyName == "" {
+		keyName = "echo-client"
+		if len(cfg.Security.APIKeys) > 0 {
+			existingName := strings.TrimSpace(cfg.Security.APIKeys[0].Name)
+			if existingName != "" {
+				keyName = existingName
+			}
+		}
+	}
+
+	if len(cfg.Security.APIKeys) == 0 {
+		cfg.Security.APIKeys = []APIKey{{Key: apiKey, Name: keyName}}
+		return
+	}
+
+	cfg.Security.APIKeys[0].Key = apiKey
+	if strings.TrimSpace(cfg.Security.APIKeys[0].Name) == "" {
+		cfg.Security.APIKeys[0].Name = keyName
 	}
 }
 
