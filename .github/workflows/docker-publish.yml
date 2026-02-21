@@ -16,6 +16,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   DEFAULT_PLATFORMS: linux/amd64
+  CACHE_SCOPE: docker-publish
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -74,8 +75,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT_SHA=${{ github.sha }}
