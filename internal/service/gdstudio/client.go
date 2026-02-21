@@ -35,10 +35,10 @@ func NewClient(cfg *config.GDStudioConfig, logger *zap.Logger) *Client {
 
 // URLResult 音频 URL 结果
 type URLResult struct {
-	URL        string `json:"url"`
-	Bitrate    int    `json:"br"`
-	Size       int64  `json:"size"`
-	Extension  string `json:"-"`
+	URL       string `json:"url"`
+	Bitrate   int    `json:"br"`
+	Size      int64  `json:"size"`
+	Extension string `json:"-"`
 }
 
 // PicResult 封面结果
@@ -84,6 +84,15 @@ func (c *Client) ResolveURL(source, trackID string, br int) (*URLResult, error) 
 
 	rawURL, _ := result["url"].(string)
 	if rawURL == "" || rawURL == "err" {
+		if msg, ok := result["msg"].(string); ok && strings.TrimSpace(msg) != "" {
+			return nil, fmt.Errorf("url resolution failed: %s", msg)
+		}
+		if errMsg, ok := result["error"].(string); ok && strings.TrimSpace(errMsg) != "" {
+			return nil, fmt.Errorf("url resolution failed: %s", errMsg)
+		}
+		if code, ok := result["code"]; ok {
+			return nil, fmt.Errorf("url resolution failed: code=%v", code)
+		}
 		return nil, fmt.Errorf("url resolution failed: empty or error response")
 	}
 

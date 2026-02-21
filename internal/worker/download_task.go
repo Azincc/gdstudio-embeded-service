@@ -36,12 +36,12 @@ type DownloadPayload struct {
 
 // DownloadTask 下载任务处理器
 type DownloadTask struct {
-	cfg          *config.Config
-	repo         *repository.JobRepository
-	gdClient     *gdstudio.Client
-	naviClient   *navidrome.Client
-	tagger       *tagger.Tagger
-	logger       *zap.Logger
+	cfg        *config.Config
+	repo       *repository.JobRepository
+	gdClient   *gdstudio.Client
+	naviClient *navidrome.Client
+	tagger     *tagger.Tagger
+	logger     *zap.Logger
 }
 
 // NewDownloadTask 创建下载任务处理器
@@ -127,10 +127,36 @@ func (t *DownloadTask) stageResolve(ctx context.Context, payload *DownloadPayloa
 	t.logger.Info("resolving metadata", zap.String("job_id", payload.JobID))
 
 	// 解析音频 URL
-	bitrate := t.getBitrateFromQuality(payload.Quality)
-	urlResult, err := t.gdClient.ResolveURL(payload.Source, payload.TrackID, bitrate)
-	if err != nil {
-		return fmt.Errorf("failed to resolve url: %w", err)
+	bitrates := t.getBitrateCandidates(payload.Quality)
+	var (
+		urlResult *gdstudio.URLResult
+		lastErr   error
+	)
+	for idx, bitrate := range bitrates {
+		urlResult, lastErr = t.gdClient.ResolveURL(payload.Source, payload.TrackID, bitrate)
+		if lastErr == nil {
+			if idx > 0 {
+				t.logger.Warn("resolve url succeeded after bitrate fallback",
+					zap.String("job_id", payload.JobID),
+					zap.String("source", payload.Source),
+					zap.String("track_id", payload.TrackID),
+					zap.Int("selected_bitrate", bitrate))
+			}
+			break
+		}
+
+		// 非最后一次失败时才打印回退提示，避免日志噪音。
+		if idx < len(bitrates)-1 {
+			t.logger.Warn("resolve url failed, trying fallback bitrate",
+				zap.String("job_id", payload.JobID),
+				zap.String("source", payload.Source),
+				zap.String("track_id", payload.TrackID),
+				zap.Int("bitrate", bitrate),
+				zap.Error(lastErr))
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to resolve url after trying bitrates %v: %w", bitrates, lastErr)
 	}
 
 	// 更新任务信息
@@ -417,6 +443,33 @@ func (t *DownloadTask) getBitrateFromQuality(quality string) int {
 	default:
 		return 320
 	}
+}
+
+// getBitrateCandidates 根据期望质量返回回退码率列表（高到低）。
+func (t *DownloadTask) getBitrateCandidates(quality string) []int {
+	primary := t.getBitrateFromQuality(quality)
+	candidates := []int{primary}
+
+	switch primary {
+	case 999:
+		candidates = append(candidates, 320, 192, 128)
+	case 320:
+		candidates = append(candidates, 192, 128)
+	case 192:
+		candidates = append(candidates, 128)
+	}
+
+	seen := make(map[int]struct{}, len(candidates))
+	unique := make([]int, 0, len(candidates))
+	for _, br := range candidates {
+		if _, ok := seen[br]; ok {
+			continue
+		}
+		seen[br] = struct{}{}
+		unique = append(unique, br)
+	}
+
+	return unique
 }
 
 // sanitizeFilename 清理文件名
