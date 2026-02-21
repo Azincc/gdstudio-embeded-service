@@ -245,6 +245,30 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	if coverID == "" {
 		coverID = payload.TrackID
 	}
+	lyricID := payload.LyricID
+	if lyricID == "" {
+		lyricID = payload.TrackID
+	}
+
+	// 当未显式提供 pic_id / lyric_id 时，先通过 search 反查。
+	if payload.PicID == "" || payload.PicID == payload.TrackID || payload.LyricID == "" {
+		resolvedPicID, resolvedLyricID, err := t.gdClient.ResolveAuxIDs(payload.Source, payload.TrackID, job.Title, job.Artist)
+		if err != nil {
+			t.logger.Debug("failed to resolve aux ids from search",
+				zap.String("source", payload.Source),
+				zap.String("track_id", payload.TrackID),
+				zap.String("title", job.Title),
+				zap.String("artist", job.Artist),
+				zap.Error(err))
+		} else {
+			if (payload.PicID == "" || payload.PicID == payload.TrackID) && resolvedPicID != "" {
+				coverID = resolvedPicID
+			}
+			if payload.LyricID == "" && resolvedLyricID != "" {
+				lyricID = resolvedLyricID
+			}
+		}
+	}
 
 	var coverURL string
 	var coverData []byte
@@ -274,11 +298,6 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	// 解析歌词（最佳努力，不阻塞主流程）。
-	lyricID := payload.LyricID
-	if lyricID == "" {
-		lyricID = payload.TrackID
-	}
-
 	var lyrics string
 	var translation string
 	if lyricID != "" {

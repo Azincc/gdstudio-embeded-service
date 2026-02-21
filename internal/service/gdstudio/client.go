@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,41 @@ type PicResult struct {
 type LyricResult struct {
 	Lyric       string `json:"lyric"`
 	Translation string `json:"tlyric"`
+}
+
+// ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
+func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, string, error) {
+	keywords := buildSearchKeywords(trackID, title, artist)
+	if len(keywords) == 0 {
+		return "", "", fmt.Errorf("search keyword is empty")
+	}
+
+	var lastErr error
+	for _, keyword := range keywords {
+		items, err := c.searchTracks(source, keyword)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(items) == 0 {
+			continue
+		}
+
+		if picID, lyricID, ok := pickAuxIDs(items, trackID, title); ok {
+			c.logger.Debug("resolved aux ids",
+				zap.String("source", source),
+				zap.String("track_id", trackID),
+				zap.String("pic_id", picID),
+				zap.String("lyric_id", lyricID),
+				zap.String("keyword", keyword))
+			return picID, lyricID, nil
+		}
+	}
+
+	if lastErr != nil {
+		return "", "", lastErr
+	}
+	return "", "", fmt.Errorf("aux ids not found from search")
 }
 
 // ResolveURL 解析播放链接
@@ -404,6 +440,131 @@ func buildCoverCandidates(rawURL string) []string {
 	}
 
 	return out
+}
+
+func buildSearchKeywords(trackID, title, artist string) []string {
+	add := func(m map[string]struct{}, out *[]string, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := m[value]; ok {
+			return
+		}
+		m[value] = struct{}{}
+		*out = append(*out, value)
+	}
+
+	var out []string
+	seen := map[string]struct{}{}
+
+	title = strings.TrimSpace(title)
+	artist = strings.TrimSpace(artist)
+	trackID = strings.TrimSpace(trackID)
+
+	firstArtist := artist
+	for _, sep := range []string{"/", ",", ";", "、"} {
+		if idx := strings.Index(firstArtist, sep); idx >= 0 {
+			firstArtist = strings.TrimSpace(firstArtist[:idx])
+		}
+	}
+
+	if title != "" && firstArtist != "" {
+		add(seen, &out, title+" "+firstArtist)
+	}
+	add(seen, &out, title)
+	add(seen, &out, trackID)
+
+	return out
+}
+
+func (c *Client) searchTracks(source, keyword string) ([]map[string]interface{}, error) {
+	baseURL := c.selectBaseURL(source)
+
+	var result []map[string]interface{}
+	resp, err := c.client.R().
+		SetQueryParams(map[string]string{
+			"types":  "search",
+			"source": source,
+			"name":   keyword,
+			"count":  "20",
+			"pages":  "1",
+		}).
+		SetResult(&result).
+		Get(baseURL + "/api.php")
+
+	if err != nil {
+		return nil, fmt.Errorf("search request failed: %w", err)
+	}
+	if resp.StatusCode() != 200 {
+		return nil, fmt.Errorf("search unexpected status code: %d", resp.StatusCode())
+	}
+
+	return result, nil
+}
+
+func pickAuxIDs(items []map[string]interface{}, trackID, title string) (string, string, bool) {
+	normalizedTitle := strings.TrimSpace(title)
+
+	// 1) 优先按 track_id 精确匹配。
+	for _, item := range items {
+		id := toString(item["id"])
+		if trackID == "" || id != trackID {
+			continue
+		}
+		picID := toString(item["pic_id"])
+		lyricID := toString(item["lyric_id"])
+		if picID != "" || lyricID != "" {
+			return picID, lyricID, true
+		}
+	}
+
+	// 2) track_id 失配时，按标题匹配。
+	if normalizedTitle != "" {
+		for _, item := range items {
+			name := toString(item["name"])
+			if !strings.EqualFold(strings.TrimSpace(name), normalizedTitle) {
+				continue
+			}
+			picID := toString(item["pic_id"])
+			lyricID := toString(item["lyric_id"])
+			if picID != "" || lyricID != "" {
+				return picID, lyricID, true
+			}
+		}
+	}
+
+	// 3) 兜底：拿第一条有 pic_id 的结果。
+	for _, item := range items {
+		picID := toString(item["pic_id"])
+		lyricID := toString(item["lyric_id"])
+		if picID != "" {
+			return picID, lyricID, true
+		}
+	}
+
+	return "", "", false
+}
+
+func toString(v interface{}) string {
+	switch val := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(val)
+	case float64:
+		return strconv.FormatInt(int64(val), 10)
+	case float32:
+		return strconv.FormatInt(int64(val), 10)
+	case int:
+		return strconv.Itoa(val)
+	case int8, int16, int32, int64:
+		return fmt.Sprintf("%d", reflect.ValueOf(val).Int())
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", reflect.ValueOf(val).Uint())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", val))
+	}
 }
 
 // extractExtension 提取文件扩展名
