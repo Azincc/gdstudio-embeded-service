@@ -54,13 +54,17 @@ func (r *JobRepository) Update(job *model.Job) error {
 
 // UpdateStatus 更新任务状态
 func (r *JobRepository) UpdateStatus(id, status, message string) error {
+	updates := map[string]interface{}{
+		"status":     status,
+		"updated_at": time.Now(),
+	}
+	if message != "" {
+		updates["message"] = message
+	}
+
 	return r.db.Model(&model.Job{}).
 		Where("id = ?", id).
-		Updates(map[string]interface{}{
-			"status":     status,
-			"message":    message,
-			"updated_at": time.Now(),
-		}).Error
+		Updates(updates).Error
 }
 
 // UpdateProgress 更新任务进度

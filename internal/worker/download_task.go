@@ -88,8 +88,8 @@ func (t *DownloadTask) ProcessTask(ctx context.Context, task *asynq.Task) error 
 	}
 
 	for _, stage := range stages {
-		// 更新状态
-		if err := t.repo.UpdateStatus(payload.JobID, stage.name, fmt.Sprintf("executing %s", stage.name)); err != nil {
+		// 更新状态。不要覆盖 message，message 字段在当前实现中用于阶段间传递下载 URL。
+		if err := t.repo.UpdateStatus(payload.JobID, stage.name, ""); err != nil {
 			t.logger.Error("failed to update status", zap.Error(err))
 		}
 
