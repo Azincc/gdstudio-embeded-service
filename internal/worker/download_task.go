@@ -30,6 +30,8 @@ type DownloadPayload struct {
 	JobID     string `json:"job_id"`
 	Source    string `json:"source"`
 	TrackID   string `json:"track_id"`
+	PicID     string `json:"pic_id,omitempty"`
+	LyricID   string `json:"lyric_id,omitempty"`
 	LibraryID string `json:"library_id"`
 	Quality   string `json:"quality"`
 }
@@ -239,10 +241,15 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	// 解析封面（最佳努力，不阻塞主流程）。
+	coverID := payload.PicID
+	if coverID == "" {
+		coverID = payload.TrackID
+	}
+
 	var coverURL string
 	var coverData []byte
-	if payload.TrackID != "" {
-		resolvedCoverURL, err := t.gdClient.ResolveCover(payload.Source, payload.TrackID)
+	if coverID != "" {
+		resolvedCoverURL, err := t.gdClient.ResolveCover(payload.Source, coverID)
 		if err != nil {
 			errMsg := strings.ToLower(err.Error())
 			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {
@@ -252,9 +259,14 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 			}
 		} else if resolvedCoverURL != "" {
 			coverURL = resolvedCoverURL
-			data, err := t.gdClient.DownloadCover(resolvedCoverURL)
+			data, err := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
 			if err != nil {
-				t.logger.Warn("failed to download cover", zap.Error(err))
+				t.logger.Warn("failed to download cover",
+					zap.String("source", payload.Source),
+					zap.String("track_id", payload.TrackID),
+					zap.String("pic_id", coverID),
+					zap.String("cover_url", resolvedCoverURL),
+					zap.Error(err))
 			} else {
 				coverData = data
 			}
@@ -262,10 +274,15 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	// 解析歌词（最佳努力，不阻塞主流程）。
+	lyricID := payload.LyricID
+	if lyricID == "" {
+		lyricID = payload.TrackID
+	}
+
 	var lyrics string
 	var translation string
-	if payload.TrackID != "" {
-		lyricResult, err := t.gdClient.ResolveLyrics(payload.Source, payload.TrackID)
+	if lyricID != "" {
+		lyricResult, err := t.gdClient.ResolveLyrics(payload.Source, lyricID)
 		if err != nil {
 			errMsg := strings.ToLower(err.Error())
 			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {

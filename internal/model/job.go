@@ -8,12 +8,14 @@ import (
 
 // Job 下载任务模型
 type Job struct {
-	ID             string         `gorm:"primaryKey;size:64" json:"id"`
-	IdempotencyKey string         `gorm:"uniqueIndex;size:255;not null" json:"idempotency_key"`
-	Source         string         `gorm:"size:32;not null" json:"source"`
-	TrackID        string         `gorm:"size:64;not null" json:"track_id"`
-	LibraryID      string         `gorm:"size:64;not null" json:"library_id"`
-	Quality        string         `gorm:"size:16" json:"quality"`
+	ID             string `gorm:"primaryKey;size:64" json:"id"`
+	IdempotencyKey string `gorm:"uniqueIndex;size:255;not null" json:"idempotency_key"`
+	Source         string `gorm:"size:32;not null" json:"source"`
+	TrackID        string `gorm:"size:64;not null" json:"track_id"`
+	PicID          string `gorm:"size:64" json:"pic_id"`
+	LyricID        string `gorm:"size:64" json:"lyric_id"`
+	LibraryID      string `gorm:"size:64;not null" json:"library_id"`
+	Quality        string `gorm:"size:16" json:"quality"`
 
 	// 元数据
 	Title       string `gorm:"size:255" json:"title"`
@@ -38,8 +40,8 @@ type Job struct {
 	Bitrate  int    `json:"bitrate"`  // kbps
 
 	// 错误信息
-	Error       string `gorm:"size:1024" json:"error"`
-	RetryCount  int    `json:"retry_count"`
+	Error       string     `gorm:"size:1024" json:"error"`
+	RetryCount  int        `json:"retry_count"`
 	LastRetryAt *time.Time `json:"last_retry_at"`
 
 	// 时间戳

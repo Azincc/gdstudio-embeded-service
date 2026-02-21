@@ -43,6 +43,8 @@ func NewJobHandler(
 type CreateJobRequest struct {
 	Source         string                 `json:"source" binding:"required"`
 	TrackID        string                 `json:"track_id" binding:"required"`
+	PicID          string                 `json:"pic_id"`
+	LyricID        string                 `json:"lyric_id"`
 	LibraryID      string                 `json:"library_id" binding:"required"`
 	Quality        string                 `json:"quality"`
 	IdempotencyKey string                 `json:"idempotency_key"`
@@ -106,6 +108,8 @@ func (h *JobHandler) Create(c *gin.Context) {
 		IdempotencyKey: idempotencyKey,
 		Source:         req.Source,
 		TrackID:        req.TrackID,
+		PicID:          req.PicID,
+		LyricID:        req.LyricID,
 		LibraryID:      req.LibraryID,
 		Quality:        req.Quality,
 		Title:          req.Title,
@@ -125,10 +129,21 @@ func (h *JobHandler) Create(c *gin.Context) {
 	}
 
 	// 创建任务载荷
+	picID := req.PicID
+	if picID == "" {
+		picID = req.TrackID
+	}
+	lyricID := req.LyricID
+	if lyricID == "" {
+		lyricID = req.TrackID
+	}
+
 	payload := worker.DownloadPayload{
 		JobID:     job.ID,
 		Source:    req.Source,
 		TrackID:   req.TrackID,
+		PicID:     picID,
+		LyricID:   lyricID,
 		LibraryID: req.LibraryID,
 		Quality:   req.Quality,
 	}
@@ -223,10 +238,21 @@ func (h *JobHandler) Retry(c *gin.Context) {
 	}
 
 	// 重新入队
+	picID := job.PicID
+	if picID == "" {
+		picID = job.TrackID
+	}
+	lyricID := job.LyricID
+	if lyricID == "" {
+		lyricID = job.TrackID
+	}
+
 	payload := worker.DownloadPayload{
 		JobID:     job.ID,
 		Source:    job.Source,
 		TrackID:   job.TrackID,
+		PicID:     picID,
+		LyricID:   lyricID,
 		LibraryID: job.LibraryID,
 		Quality:   job.Quality,
 	}
@@ -242,8 +268,8 @@ func (h *JobHandler) Retry(c *gin.Context) {
 	h.repo.IncrementRetry(job.ID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"job_id": job.ID,
-		"status": model.JobStatusQueued,
+		"job_id":  job.ID,
+		"status":  model.JobStatusQueued,
 		"message": "job queued for retry",
 	})
 }
@@ -273,8 +299,8 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"job_id": job.ID,
-		"status": model.JobStatusCancelled,
+		"job_id":  job.ID,
+		"status":  model.JobStatusCancelled,
 		"message": "job cancelled successfully",
 	})
 }

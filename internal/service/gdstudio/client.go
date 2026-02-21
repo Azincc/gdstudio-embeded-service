@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,9 +124,29 @@ func (c *Client) ResolveCover(source, picID string) (string, error) {
 		return "", nil
 	}
 
+	// 某些源对不同尺寸支持不一致，按尺寸回退尝试。
+	sizes := []int{1000, 640, 500, 300}
+	var lastErr error
+	for _, size := range sizes {
+		coverURL, err := c.resolveCoverWithSize(source, picID, size)
+		if err == nil {
+			return coverURL, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return "", lastErr
+	}
+
+	return "", fmt.Errorf("cover url not found")
+}
+
+func (c *Client) resolveCoverWithSize(source, picID string, size int) (string, error) {
 	c.logger.Debug("resolving cover",
 		zap.String("source", source),
-		zap.String("pic_id", picID))
+		zap.String("pic_id", picID),
+		zap.Int("size", size))
 
 	baseURL := c.selectBaseURL(source)
 	sig := c.generateSignature(picID)
@@ -136,7 +157,7 @@ func (c *Client) ResolveCover(source, picID string) (string, error) {
 			"types":  "pic",
 			"source": source,
 			"id":     picID,
-			"size":   "640",
+			"size":   strconv.Itoa(size),
 			"s":      sig,
 		}).
 		SetResult(&result).
@@ -214,25 +235,52 @@ func (c *Client) ResolveLyrics(source, lyricID string) (*LyricResult, error) {
 }
 
 // DownloadCover 下载封面数据
-func (c *Client) DownloadCover(coverURL string) ([]byte, error) {
+func (c *Client) DownloadCover(source, coverURL string) ([]byte, error) {
 	if coverURL == "" {
 		return nil, nil
 	}
 
-	c.logger.Debug("downloading cover", zap.String("url", coverURL))
+	referer := coverReferer(source)
+	candidates := buildCoverCandidates(coverURL)
+	var lastErr error
 
-	resp, err := c.client.R().Get(coverURL)
-	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
+	for _, candidate := range candidates {
+		req := c.client.R().
+			SetHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+		if referer != "" {
+			req.SetHeader("Referer", referer)
+		}
+
+		c.logger.Debug("downloading cover", zap.String("url", candidate))
+
+		resp, err := req.Get(candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("download failed: %w", err)
+			continue
+		}
+		if resp.StatusCode() != 200 {
+			lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode())
+			c.logger.Debug("cover download attempt failed",
+				zap.String("url", candidate),
+				zap.Int("status", resp.StatusCode()))
+			continue
+		}
+		if len(resp.Body()) == 0 {
+			lastErr = fmt.Errorf("empty cover response")
+			continue
+		}
+
+		c.logger.Debug("cover downloaded",
+			zap.String("url", candidate),
+			zap.Int("size", len(resp.Body())))
+
+		return resp.Body(), nil
 	}
 
-	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode())
+	if lastErr != nil {
+		return nil, lastErr
 	}
-
-	c.logger.Debug("cover downloaded", zap.Int("size", len(resp.Body())))
-
-	return resp.Body(), nil
+	return nil, fmt.Errorf("cover download failed")
 }
 
 // selectBaseURL 根据 source 选择合适的 API 入口
@@ -283,6 +331,79 @@ func sanitizeURL(raw string) string {
 		"&quot;", "\"",
 		"&#x27;", "'",
 	).Replace(strings.TrimSpace(raw))
+}
+
+func coverReferer(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "netease":
+		return "https://music.163.com/"
+	case "qq":
+		return "https://y.qq.com/"
+	case "kuwo":
+		return "https://www.kuwo.cn/"
+	default:
+		return ""
+	}
+}
+
+func buildCoverCandidates(rawURL string) []string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return []string{rawURL}
+	}
+
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(next *url.URL) {
+		if next == nil {
+			return
+		}
+		s := next.String()
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+
+	add(u)
+
+	// 一些 CDN 的 query 参数会失效，尝试去掉 query。
+	if u.RawQuery != "" {
+		noQuery := *u
+		noQuery.RawQuery = ""
+		add(&noQuery)
+	}
+
+	values := u.Query()
+	origParam := strings.TrimSpace(values.Get("param"))
+	sizeParams := []string{"1000y1000", "640y640", "500y500", "300y300"}
+
+	if origParam != "" {
+		// 先尝试原始 param，再尝试常见尺寸回退。
+		if sizeParams[0] != origParam {
+			sizeParams = append([]string{origParam}, sizeParams...)
+		}
+		for _, param := range sizeParams {
+			withParam := *u
+			q := withParam.Query()
+			q.Set("param", param)
+			withParam.RawQuery = q.Encode()
+			add(&withParam)
+		}
+	} else {
+		// 无尺寸参数时补一个常见尺寸，提高兼容性。
+		withParam := *u
+		q := withParam.Query()
+		q.Set("param", sizeParams[0])
+		withParam.RawQuery = q.Encode()
+		add(&withParam)
+	}
+
+	return out
 }
 
 // extractExtension 提取文件扩展名
