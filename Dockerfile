@@ -28,7 +28,8 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
 FROM alpine:latest
 
 # 安装运行时依赖
-RUN apk add --no-cache ca-certificates taglib tzdata bash && \
+# flac 包提供 metaflac，用于写入 FLAC 元数据
+RUN apk add --no-cache ca-certificates taglib tzdata bash flac && \
     addgroup -g 1000 appuser && \
     adduser -D -u 1000 -G appuser appuser
 

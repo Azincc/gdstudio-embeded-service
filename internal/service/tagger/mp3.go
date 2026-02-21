@@ -3,6 +3,7 @@ package tagger
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	id3v2 "github.com/bogem/id3v2/v2"
@@ -80,7 +81,7 @@ func (t *Tagger) WriteCoverToFile(audioPath string, coverData []byte) error {
 		return nil
 	}
 
-	coverPath := audioPath[:len(audioPath)-len(audioPath)] + ".jpg"
+	coverPath := audioPath[:len(audioPath)-len(filepath.Ext(audioPath))] + ".jpg"
 	if err := os.WriteFile(coverPath, coverData, 0644); err != nil {
 		return fmt.Errorf("failed to write cover file: %w", err)
 	}

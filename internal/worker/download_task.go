@@ -238,16 +238,46 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		return fmt.Errorf("failed to find job: %w", err)
 	}
 
-	// 解析封面
+	// 解析封面（最佳努力，不阻塞主流程）。
+	var coverURL string
 	var coverData []byte
-	if job.Album != "" {
-		// 尝试获取封面（这里需要保存 picID，简化实现先跳过）
-		t.logger.Debug("cover resolution skipped for now")
+	if payload.TrackID != "" {
+		resolvedCoverURL, err := t.gdClient.ResolveCover(payload.Source, payload.TrackID)
+		if err != nil {
+			errMsg := strings.ToLower(err.Error())
+			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {
+				t.logger.Debug("cover not available", zap.Error(err))
+			} else {
+				t.logger.Warn("failed to resolve cover", zap.Error(err))
+			}
+		} else if resolvedCoverURL != "" {
+			coverURL = resolvedCoverURL
+			data, err := t.gdClient.DownloadCover(resolvedCoverURL)
+			if err != nil {
+				t.logger.Warn("failed to download cover", zap.Error(err))
+			} else {
+				coverData = data
+			}
+		}
 	}
 
-	// 解析歌词
+	// 解析歌词（最佳努力，不阻塞主流程）。
 	var lyrics string
-	// 类似封面，需要 lyricID
+	var translation string
+	if payload.TrackID != "" {
+		lyricResult, err := t.gdClient.ResolveLyrics(payload.Source, payload.TrackID)
+		if err != nil {
+			errMsg := strings.ToLower(err.Error())
+			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {
+				t.logger.Debug("lyrics not available", zap.Error(err))
+			} else {
+				t.logger.Warn("failed to resolve lyrics", zap.Error(err))
+			}
+		} else if lyricResult != nil {
+			lyrics = lyricResult.Lyric
+			translation = lyricResult.Translation
+		}
+	}
 
 	// 构建元数据
 	metadata := &model.TrackMetadata{
@@ -256,8 +286,10 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		Album:       job.Album,
 		TrackNumber: job.TrackNumber,
 		Year:        job.Year,
+		CoverURL:    coverURL,
 		CoverData:   coverData,
 		Lyrics:      lyrics,
+		Translation: translation,
 	}
 
 	// 写入标签
@@ -286,6 +318,7 @@ func (t *DownloadTask) stageMoving(ctx context.Context, payload *DownloadPayload
 	}
 
 	// 构建目标路径
+	sourcePath := job.FilePath
 	targetPath := t.buildTargetPath(job)
 	targetDir := filepath.Dir(targetPath)
 
@@ -295,12 +328,19 @@ func (t *DownloadTask) stageMoving(ctx context.Context, payload *DownloadPayload
 	}
 
 	// 移动文件（同分区使用 rename，跨分区使用 copy）
-	if err := os.Rename(job.FilePath, targetPath); err != nil {
+	if err := os.Rename(sourcePath, targetPath); err != nil {
 		// Fallback: copy then delete
-		if err := t.copyFile(job.FilePath, targetPath); err != nil {
+		if err := t.copyFile(sourcePath, targetPath); err != nil {
 			return fmt.Errorf("failed to copy file: %w", err)
 		}
-		os.Remove(job.FilePath)
+		os.Remove(sourcePath)
+	}
+
+	// 把同名的 sidecar 文件一并移动到目标目录。
+	for _, ext := range []string{".lrc", ".nfo"} {
+		if err := t.moveSidecar(sourcePath, targetPath, ext); err != nil {
+			t.logger.Warn("failed to move sidecar", zap.String("ext", ext), zap.Error(err))
+		}
 	}
 
 	// 更新文件路径
@@ -409,6 +449,26 @@ func (t *DownloadTask) copyFile(src, dst string) error {
 
 	_, err = io.Copy(destination, source)
 	return err
+}
+
+func (t *DownloadTask) moveSidecar(srcAudioPath, dstAudioPath, ext string) error {
+	srcPath := strings.TrimSuffix(srcAudioPath, filepath.Ext(srcAudioPath)) + ext
+	if _, err := os.Stat(srcPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	dstPath := strings.TrimSuffix(dstAudioPath, filepath.Ext(dstAudioPath)) + ext
+	if err := os.Rename(srcPath, dstPath); err != nil {
+		if err := t.copyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+		return os.Remove(srcPath)
+	}
+
+	return nil
 }
 
 // buildTargetPath 构建目标路径
