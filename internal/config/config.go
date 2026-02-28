@@ -12,16 +12,17 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	GDStudio  GDStudioConfig  `mapstructure:"gdstudio"`
-	Navidrome NavidromeConfig `mapstructure:"navidrome"`
-	Storage   StorageConfig   `mapstructure:"storage"`
-	Worker    WorkerConfig    `mapstructure:"worker"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Redis     RedisConfig     `mapstructure:"redis"`
-	Security  SecurityConfig  `mapstructure:"security"`
-	Logging   LoggingConfig   `mapstructure:"logging"`
-	Metrics   MetricsConfig   `mapstructure:"metrics"`
+	Server      ServerConfig      `mapstructure:"server"`
+	GDStudio    GDStudioConfig    `mapstructure:"gdstudio"`
+	Navidrome   NavidromeConfig   `mapstructure:"navidrome"`
+	Storage     StorageConfig     `mapstructure:"storage"`
+	Worker      WorkerConfig      `mapstructure:"worker"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	Redis       RedisConfig       `mapstructure:"redis"`
+	Security    SecurityConfig    `mapstructure:"security"`
+	Logging     LoggingConfig     `mapstructure:"logging"`
+	Metrics     MetricsConfig     `mapstructure:"metrics"`
+	MusicBrainz MusicBrainzConfig `mapstructure:"musicbrainz"`
 }
 
 type ServerConfig struct {
@@ -104,6 +105,15 @@ type MetricsConfig struct {
 	Path    string `mapstructure:"path"`
 }
 
+// MusicBrainzConfig MusicBrainz 元数据查询配置（可选）
+type MusicBrainzConfig struct {
+	Enabled       bool          `mapstructure:"enabled"`
+	BaseURL       string        `mapstructure:"base_url"`
+	UserAgent     string        `mapstructure:"user_agent"`
+	RateLimitMs   int           `mapstructure:"rate_limit_ms"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+}
+
 // Load 加载配置
 func Load(configPath string) (*Config, error) {
 	v := viper.New()
@@ -132,6 +142,8 @@ func Load(configPath string) (*Config, error) {
 	v.BindEnv("worker.max_concurrent", "MAX_CONCURRENT_JOBS")
 	v.BindEnv("worker.download_timeout", "DOWNLOAD_TIMEOUT")
 	v.BindEnv("logging.level", "LOG_LEVEL")
+	v.BindEnv("musicbrainz.enabled", "MUSICBRAINZ_ENABLED")
+	v.BindEnv("musicbrainz.user_agent", "MUSICBRAINZ_USER_AGENT")
 
 	// 读取配置文件
 	if err := v.ReadInConfig(); err != nil {
@@ -197,6 +209,18 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Logging.Output == "" {
 		cfg.Logging.Output = "stdout"
+	}
+	if cfg.MusicBrainz.BaseURL == "" {
+		cfg.MusicBrainz.BaseURL = "https://musicbrainz.org/ws/2"
+	}
+	if cfg.MusicBrainz.UserAgent == "" {
+		cfg.MusicBrainz.UserAgent = "EchoEmbedService/1.0 (https://github.com/Azincc/gdstudio-embeded-service)"
+	}
+	if cfg.MusicBrainz.RateLimitMs == 0 {
+		cfg.MusicBrainz.RateLimitMs = 1100
+	}
+	if cfg.MusicBrainz.Timeout == 0 {
+		cfg.MusicBrainz.Timeout = 10 * time.Second
 	}
 }
 

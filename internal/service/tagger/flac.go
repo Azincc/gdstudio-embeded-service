@@ -21,6 +21,7 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 	removeArgs := []string{
 		"--remove-tag=TITLE",
 		"--remove-tag=ARTIST",
+		"--remove-tag=ALBUMARTIST",
 		"--remove-tag=ALBUM",
 		"--remove-tag=TRACKNUMBER",
 		"--remove-tag=DATE",
@@ -43,6 +44,7 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 
 	addTag("TITLE", metadata.Title)
 	addTag("ARTIST", metadata.Artist)
+	addTag("ALBUMARTIST", metadata.AlbumArtist)
 	addTag("ALBUM", metadata.Album)
 	if metadata.TrackNumber > 0 {
 		addTag("TRACKNUMBER", strconv.Itoa(metadata.TrackNumber))

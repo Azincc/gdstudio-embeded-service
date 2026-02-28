@@ -15,6 +15,7 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
+	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
 	"github.com/hibiken/asynq"
@@ -43,6 +44,7 @@ type DownloadTask struct {
 	gdClient   *gdstudio.Client
 	naviClient *navidrome.Client
 	tagger     *tagger.Tagger
+	mbClient   *musicbrainz.Client
 	logger     *zap.Logger
 }
 
@@ -53,6 +55,7 @@ func NewDownloadTask(
 	gdClient *gdstudio.Client,
 	naviClient *navidrome.Client,
 	tagger *tagger.Tagger,
+	mbClient *musicbrainz.Client,
 	logger *zap.Logger,
 ) *DownloadTask {
 	return &DownloadTask{
@@ -61,6 +64,7 @@ func NewDownloadTask(
 		gdClient:   gdClient,
 		naviClient: naviClient,
 		tagger:     tagger,
+		mbClient:   mbClient,
 		logger:     logger,
 	}
 }
@@ -315,10 +319,14 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		}
 	}
 
+	// 查询 Album Artist（MusicBrainz + fallback）
+	albumArtist := t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
+
 	// 构建元数据
 	metadata := &model.TrackMetadata{
 		Title:       job.Title,
 		Artist:      job.Artist,
+		AlbumArtist: albumArtist,
 		Album:       job.Album,
 		TrackNumber: job.TrackNumber,
 		Year:        job.Year,
@@ -326,6 +334,14 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		CoverData:   coverData,
 		Lyrics:      lyrics,
 		Translation: translation,
+	}
+
+	// 持久化 AlbumArtist 到 Job
+	if albumArtist != "" && job.AlbumArtist != albumArtist {
+		job.AlbumArtist = albumArtist
+		if err := t.repo.Update(job); err != nil {
+			t.logger.Warn("failed to persist album artist", zap.Error(err))
+		}
 	}
 
 	// 写入标签
@@ -509,8 +525,12 @@ func (t *DownloadTask) moveSidecar(srcAudioPath, dstAudioPath, ext string) error
 
 // buildTargetPath 构建目标路径
 func (t *DownloadTask) buildTargetPath(job *model.Job) string {
-	// 清理文件名中的非法字符
-	cleanArtist := sanitizeFilename(job.Artist)
+	// 优先使用 AlbumArtist 作为目录名，保证同一专辑的歌曲在同一目录
+	artistDir := job.AlbumArtist
+	if artistDir == "" {
+		artistDir = job.Artist
+	}
+	cleanArtist := sanitizeFilename(artistDir)
 	cleanAlbum := sanitizeFilename(job.Album)
 	cleanTitle := sanitizeFilename(job.Title)
 
@@ -577,4 +597,32 @@ func sanitizeFilename(name string) string {
 		result = strings.ReplaceAll(result, char, "_")
 	}
 	return strings.TrimSpace(result)
+}
+
+// resolveAlbumArtist 查询 Album Artist：MusicBrainz → fallback 第一艺术家
+func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) string {
+	// 先尝试 MusicBrainz
+	if t.mbClient != nil {
+		albumArtist, err := t.mbClient.LookupAlbumArtist(title, artist, album)
+		if err != nil {
+			t.logger.Warn("musicbrainz lookup failed", zap.Error(err))
+		} else if albumArtist != "" {
+			t.logger.Info("album artist resolved via musicbrainz",
+				zap.String("title", title),
+				zap.String("album_artist", albumArtist))
+			return albumArtist
+		}
+	}
+
+	// Fallback：从 Artist 字段提取第一个艺术家
+	fallback := musicbrainz.ExtractFirstArtist(artist)
+	if fallback != artist && fallback != "" {
+		t.logger.Info("album artist fallback to first artist",
+			zap.String("original", artist),
+			zap.String("album_artist", fallback))
+		return fallback
+	}
+
+	// 如果 Artist 本身就是单人的，直接用
+	return artist
 }

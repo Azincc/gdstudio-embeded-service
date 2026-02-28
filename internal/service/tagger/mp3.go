@@ -31,6 +31,12 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 	tag.SetArtist(metadata.Artist)
 	tag.SetAlbum(metadata.Album)
 
+	// 写入 Album Artist (TPE2)
+	if metadata.AlbumArtist != "" {
+		tag.AddTextFrame(tag.CommonID("Band/orchestra/accompaniment"),
+			tag.DefaultEncoding(), metadata.AlbumArtist)
+	}
+
 	if metadata.TrackNumber > 0 {
 		tag.AddTextFrame(tag.CommonID("Track number/Position in set"),
 			tag.DefaultEncoding(),

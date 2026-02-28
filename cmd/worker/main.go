@@ -10,6 +10,7 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
+	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
 	"github.com/azin/gdstudio-embed-service/internal/worker"
@@ -69,6 +70,16 @@ func main() {
 		log.Fatal("failed to create work dir", zap.Error(err))
 	}
 
+	// 初始化 MusicBrainz 客户端（可选）
+	var mbClient *musicbrainz.Client
+	if cfg.MusicBrainz.Enabled {
+		mbClient = musicbrainz.NewClient(&cfg.MusicBrainz, log)
+		log.Info("musicbrainz client enabled",
+			zap.String("base_url", cfg.MusicBrainz.BaseURL))
+	} else {
+		log.Info("musicbrainz client disabled, album artist will use fallback")
+	}
+
 	// 初始化任务处理器
 	downloadTask := worker.NewDownloadTask(
 		cfg,
@@ -76,6 +87,7 @@ func main() {
 		gdClient,
 		naviClient,
 		taggerService,
+		mbClient,
 		log,
 	)
 

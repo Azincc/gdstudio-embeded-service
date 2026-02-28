@@ -20,6 +20,7 @@ type Job struct {
 	// 元数据
 	Title       string `gorm:"size:255" json:"title"`
 	Artist      string `gorm:"size:255" json:"artist"`
+	AlbumArtist string `gorm:"size:255" json:"album_artist"`
 	Album       string `gorm:"size:255" json:"album"`
 	TrackNumber int    `json:"track_number"`
 	Year        int    `json:"year"`
@@ -59,6 +60,7 @@ func (Job) TableName() string {
 type TrackMetadata struct {
 	Title       string
 	Artist      string
+	AlbumArtist string
 	Album       string
 	TrackNumber int
 	Year        int
