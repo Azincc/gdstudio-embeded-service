@@ -141,6 +141,11 @@ func (r *JobRepository) CountByStatus(status string) (int64, error) {
 	return count, err
 }
 
+// Delete 永久删除任务（用于 force 重新下载时清除幂等记录）
+func (r *JobRepository) Delete(id string) error {
+	return r.db.Unscoped().Where("id = ?", id).Delete(&model.Job{}).Error
+}
+
 // DeleteOldJobs 删除旧任务（已完成或失败超过指定天数）
 func (r *JobRepository) DeleteOldJobs(days int) error {
 	cutoff := time.Now().AddDate(0, 0, -days)

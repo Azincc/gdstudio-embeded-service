@@ -48,6 +48,7 @@ type CreateJobRequest struct {
 	LibraryID      string                 `json:"library_id" binding:"required"`
 	Quality        string                 `json:"quality"`
 	IdempotencyKey string                 `json:"idempotency_key"`
+	Force          bool                   `json:"force"`
 	PathPolicy     map[string]interface{} `json:"path_policy"`
 
 	// 可选的元数据（如果客户端已知）
@@ -93,13 +94,28 @@ func (h *JobHandler) Create(c *gin.Context) {
 	}
 
 	if existing != nil {
-		h.logger.Info("job already exists", zap.String("job_id", existing.ID))
-		c.JSON(http.StatusOK, CreateJobResponse{
-			JobID:   existing.ID,
-			Status:  existing.Status,
-			Message: "job already exists",
-		})
-		return
+		// 支持 force 参数：允许重新下载已完成/已取消的任务
+		canForce := existing.Status == model.JobStatusDone ||
+			existing.Status == model.JobStatusCancelled
+		if req.Force && canForce {
+			h.logger.Info("force re-download, removing old job",
+				zap.String("old_job_id", existing.ID),
+				zap.String("old_status", existing.Status))
+			if err := h.repo.Delete(existing.ID); err != nil {
+				h.logger.Error("failed to delete old job", zap.Error(err))
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove old job"})
+				return
+			}
+			// 继续创建新任务
+		} else {
+			h.logger.Info("job already exists", zap.String("job_id", existing.ID))
+			c.JSON(http.StatusOK, CreateJobResponse{
+				JobID:   existing.ID,
+				Status:  existing.Status,
+				Message: "job already exists",
+			})
+			return
+		}
 	}
 
 	// 创建新任务
