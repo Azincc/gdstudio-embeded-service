@@ -321,6 +321,60 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 	})
 }
 
+// Delete 删除单个任务
+func (h *JobHandler) Delete(c *gin.Context) {
+	jobID := c.Param("id")
+
+	_, err := h.repo.FindByID(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+
+	if err := h.repo.Delete(jobID); err != nil {
+		h.logger.Error("failed to delete job", zap.String("job_id", jobID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete job"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "job deleted successfully",
+	})
+}
+
+// BatchDelete 批量删除任务
+func (h *JobHandler) BatchDelete(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: ids is required"})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids cannot be empty"})
+		return
+	}
+
+	var deleted, failed int
+	for _, id := range req.IDs {
+		if err := h.repo.Delete(id); err != nil {
+			h.logger.Warn("batch delete: failed to delete job", zap.String("job_id", id), zap.Error(err))
+			failed++
+		} else {
+			deleted++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"deleted": deleted,
+		"failed":  failed,
+		"message": fmt.Sprintf("deleted %d jobs, %d failed", deleted, failed),
+	})
+}
+
 // Health 健康检查
 func (h *JobHandler) Health(c *gin.Context) {
 	// 检查数据库

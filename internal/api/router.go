@@ -32,6 +32,8 @@ func SetupRouter(cfg *config.Config, jobHandler *handlers.JobHandler) *gin.Engin
 		v1.GET("/jobs/:id", jobHandler.Get)
 		v1.POST("/jobs/:id/retry", jobHandler.Retry)
 		v1.POST("/jobs/:id/cancel", jobHandler.Cancel)
+		v1.DELETE("/jobs/:id", jobHandler.Delete)
+		v1.POST("/jobs/batch-delete", jobHandler.BatchDelete)
 	}
 
 	return r
