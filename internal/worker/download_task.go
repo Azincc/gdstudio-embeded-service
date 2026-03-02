@@ -26,7 +26,7 @@ const (
 	TypeDownload = "download"
 
 	// 封面/歌词获取的重试参数
-	auxMaxRetries    = 3
+	auxMaxRetries    = 10
 	auxRetryBaseWait = 1 * time.Second
 )
 
