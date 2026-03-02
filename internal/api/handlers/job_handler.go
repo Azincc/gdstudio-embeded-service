@@ -94,9 +94,10 @@ func (h *JobHandler) Create(c *gin.Context) {
 	}
 
 	if existing != nil {
-		// 支持 force 参数：允许重新下载已完成/已取消的任务
+		// 支持 force 参数：允许重新下载已完成/已取消/失败的任务
 		canForce := existing.Status == model.JobStatusDone ||
-			existing.Status == model.JobStatusCancelled
+			existing.Status == model.JobStatusCancelled ||
+			existing.Status == model.JobStatusFailed
 		if req.Force && canForce {
 			h.logger.Info("force re-download, removing old job",
 				zap.String("old_job_id", existing.ID),
@@ -109,6 +110,9 @@ func (h *JobHandler) Create(c *gin.Context) {
 			// 继续创建新任务
 		} else {
 			h.logger.Info("job already exists", zap.String("job_id", existing.ID))
+			existing.UpdatedAt = time.Now()
+			existing.CreatedAt = time.Now()
+			h.repo.Update(existing)
 			c.JSON(http.StatusOK, CreateJobResponse{
 				JobID:   existing.ID,
 				Status:  existing.Status,
@@ -247,6 +251,8 @@ func (h *JobHandler) Retry(c *gin.Context) {
 	job.Status = model.JobStatusQueued
 	job.Error = ""
 	job.Message = "retrying"
+	job.UpdatedAt = time.Now()
+	job.CreatedAt = time.Now()
 
 	if err := h.repo.Update(job); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update job"})
