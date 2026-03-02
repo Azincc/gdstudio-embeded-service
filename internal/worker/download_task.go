@@ -28,6 +28,7 @@ const (
 	// 封面/歌词获取的重试参数
 	auxMaxRetries    = 10
 	auxRetryBaseWait = 1 * time.Second
+	auxMaxWait       = 60 * time.Second
 )
 
 // DownloadPayload 下载任务载荷
@@ -619,7 +620,11 @@ func retryWithBackoff(maxRetries int, baseWait time.Duration, fn func() error, s
 		}
 		// 最后一次失败不再等待
 		if attempt < maxRetries-1 {
-			time.Sleep(baseWait * time.Duration(1<<uint(attempt))) // 1s, 2s, 4s ...
+			wait := baseWait * time.Duration(1<<uint(attempt)) // 1s, 2s, 4s ...
+			if wait > auxMaxWait {
+				wait = auxMaxWait
+			}
+			time.Sleep(wait)
 		}
 	}
 	return lastErr
