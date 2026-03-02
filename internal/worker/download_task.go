@@ -24,6 +24,10 @@ import (
 
 const (
 	TypeDownload = "download"
+
+	// 封面/歌词获取的重试参数
+	auxMaxRetries    = 3
+	auxRetryBaseWait = 1 * time.Second
 )
 
 // DownloadPayload 下载任务载荷
@@ -277,42 +281,54 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	var coverURL string
 	var coverData []byte
 	if coverID != "" {
-		resolvedCoverURL, err := t.gdClient.ResolveCover(payload.Source, coverID)
-		if err != nil {
-			errMsg := strings.ToLower(err.Error())
-			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {
-				t.logger.Debug("cover not available", zap.Error(err))
-			} else {
-				t.logger.Warn("failed to resolve cover", zap.Error(err))
+		// 带重试的封面 URL 解析
+		var resolvedCoverURL string
+		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+			url, e := t.gdClient.ResolveCover(payload.Source, coverID)
+			if e != nil {
+				return e
 			}
+			resolvedCoverURL = url
+			return nil
+		}, isNotFoundError)
+		if err != nil {
+			t.logger.Warn("failed to resolve cover after retries", zap.Int("max_retries", auxMaxRetries), zap.Error(err))
 		} else if resolvedCoverURL != "" {
 			coverURL = resolvedCoverURL
-			data, err := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
-			if err != nil {
-				t.logger.Warn("failed to download cover",
-					zap.String("source", payload.Source),
-					zap.String("track_id", payload.TrackID),
-					zap.String("pic_id", coverID),
-					zap.String("cover_url", resolvedCoverURL),
-					zap.Error(err))
-			} else {
+			// 带重试的封面下载
+			err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+				data, e := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
+				if e != nil {
+					return e
+				}
 				coverData = data
+				return nil
+			}, isNotFoundError)
+			if err != nil {
+				t.logger.Warn("failed to download cover after retries",
+					zap.String("source", payload.Source),
+					zap.String("pic_id", coverID),
+					zap.Int("max_retries", auxMaxRetries),
+					zap.Error(err))
 			}
 		}
 	}
 
-	// 解析歌词（最佳努力，不阻塞主流程）。
+	// 带重试的歌词解析
 	var lyrics string
 	var translation string
 	if lyricID != "" {
-		lyricResult, err := t.gdClient.ResolveLyrics(payload.Source, lyricID)
-		if err != nil {
-			errMsg := strings.ToLower(err.Error())
-			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response") {
-				t.logger.Debug("lyrics not available", zap.Error(err))
-			} else {
-				t.logger.Warn("failed to resolve lyrics", zap.Error(err))
+		var lyricResult *gdstudio.LyricResult
+		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+			result, e := t.gdClient.ResolveLyrics(payload.Source, lyricID)
+			if e != nil {
+				return e
 			}
+			lyricResult = result
+			return nil
+		}, isNotFoundError)
+		if err != nil {
+			t.logger.Warn("failed to resolve lyrics after retries", zap.Int("max_retries", auxMaxRetries), zap.Error(err))
 		} else if lyricResult != nil {
 			lyrics = lyricResult.Lyric
 			translation = lyricResult.Translation
@@ -586,6 +602,36 @@ func (t *DownloadTask) getBitrateCandidates(quality string) []int {
 	}
 
 	return unique
+}
+
+// retryWithBackoff 通用重试函数，支持指数退避。
+// skipRetry 可选回调：如果返回 true 则不再重试（如 404 not found）。
+func retryWithBackoff(maxRetries int, baseWait time.Duration, fn func() error, skipRetry func(error) bool) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		// 判断是否应跳过重试（不可恢复的错误）
+		if skipRetry != nil && skipRetry(lastErr) {
+			return lastErr
+		}
+		// 最后一次失败不再等待
+		if attempt < maxRetries-1 {
+			time.Sleep(baseWait * time.Duration(1<<uint(attempt))) // 1s, 2s, 4s ...
+		}
+	}
+	return lastErr
+}
+
+// isNotFoundError 判断错误是否为资源不存在（不可恢复），不需要重试。
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "empty or error response")
 }
 
 // sanitizeFilename 清理文件名
