@@ -72,7 +72,7 @@ func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, s
 			continue
 		}
 
-		if picID, lyricID, ok := pickAuxIDs(items, trackID, title); ok {
+		if picID, lyricID, ok := pickAuxIDs(items, trackID, title, artist); ok {
 			c.logger.Debug("resolved aux ids",
 				zap.String("source", source),
 				zap.String("track_id", trackID),
@@ -503,8 +503,9 @@ func (c *Client) searchTracks(source, keyword string) ([]map[string]interface{},
 	return result, nil
 }
 
-func pickAuxIDs(items []map[string]interface{}, trackID, title string) (string, string, bool) {
+func pickAuxIDs(items []map[string]interface{}, trackID, title, artist string) (string, string, bool) {
 	normalizedTitle := strings.TrimSpace(title)
+	normalizedArtist := strings.TrimSpace(artist)
 
 	// 1) 优先按 track_id 精确匹配。
 	for _, item := range items {
@@ -519,12 +520,30 @@ func pickAuxIDs(items []map[string]interface{}, trackID, title string) (string, 
 		}
 	}
 
-	// 2) track_id 失配时，按标题匹配。
+	// 2) track_id 失配时，按标题+艺术家匹配。
 	if normalizedTitle != "" {
 		for _, item := range items {
 			name := toString(item["name"])
 			if !strings.EqualFold(strings.TrimSpace(name), normalizedTitle) {
 				continue
+			}
+			// 同时校验艺术家（至少有部分匹配），避免同名歌曲返回错误封面
+			if normalizedArtist != "" {
+				itemArtist := toString(item["artist"])
+				if itemArtist == "" {
+					// 尝试嵌套 artist 列表
+					if artists, ok := item["artist"].([]interface{}); ok && len(artists) > 0 {
+						if artistMap, ok := artists[0].(map[string]interface{}); ok {
+							itemArtist = toString(artistMap["name"])
+						}
+					}
+				}
+				if itemArtist != "" && !strings.Contains(
+					strings.ToLower(itemArtist), strings.ToLower(normalizedArtist)) &&
+					!strings.Contains(
+						strings.ToLower(normalizedArtist), strings.ToLower(itemArtist)) {
+					continue
+				}
 			}
 			picID := toString(item["pic_id"])
 			lyricID := toString(item["lyric_id"])
@@ -534,15 +553,7 @@ func pickAuxIDs(items []map[string]interface{}, trackID, title string) (string, 
 		}
 	}
 
-	// 3) 兜底：拿第一条有 pic_id 的结果。
-	for _, item := range items {
-		picID := toString(item["pic_id"])
-		lyricID := toString(item["lyric_id"])
-		if picID != "" {
-			return picID, lyricID, true
-		}
-	}
-
+	// 不再盲目返回第一条有 pic_id 的结果，避免返回无关歌曲的封面。
 	return "", "", false
 }
 

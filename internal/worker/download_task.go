@@ -250,6 +250,7 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	// 解析封面（最佳努力，不阻塞主流程）。
+	// 策略：先用 trackID 直接解析封面，成功则跳过搜索；失败再走搜索反查。
 	coverID := payload.PicID
 	if coverID == "" {
 		coverID = payload.TrackID
@@ -259,30 +260,11 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		lyricID = payload.TrackID
 	}
 
-	// 当未显式提供 pic_id / lyric_id 时，先通过 search 反查。
-	if payload.PicID == "" || payload.PicID == payload.TrackID || payload.LyricID == "" {
-		resolvedPicID, resolvedLyricID, err := t.gdClient.ResolveAuxIDs(payload.Source, payload.TrackID, job.Title, job.Artist)
-		if err != nil {
-			t.logger.Debug("failed to resolve aux ids from search",
-				zap.String("source", payload.Source),
-				zap.String("track_id", payload.TrackID),
-				zap.String("title", job.Title),
-				zap.String("artist", job.Artist),
-				zap.Error(err))
-		} else {
-			if (payload.PicID == "" || payload.PicID == payload.TrackID) && resolvedPicID != "" {
-				coverID = resolvedPicID
-			}
-			if payload.LyricID == "" && resolvedLyricID != "" {
-				lyricID = resolvedLyricID
-			}
-		}
-	}
-
+	// 第 1 步：尝试用 trackID 直接解析封面 URL
 	var coverURL string
 	var coverData []byte
+	directCoverResolved := false
 	if coverID != "" {
-		// 带重试的封面 URL 解析
 		var resolvedCoverURL string
 		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
 			url, e := t.gdClient.ResolveCover(payload.Source, coverID)
@@ -292,12 +274,10 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 			resolvedCoverURL = url
 			return nil
 		}, isNotFoundError)
-		if err != nil {
-			t.logger.Warn("failed to resolve cover after retries", zap.Int("max_retries", auxMaxRetries), zap.Error(err))
-		} else if resolvedCoverURL != "" {
+		if err == nil && resolvedCoverURL != "" {
+			// 直接解析成功，下载封面
 			coverURL = resolvedCoverURL
-			// 带重试的封面下载
-			err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+			dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
 				data, e := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
 				if e != nil {
 					return e
@@ -305,12 +285,70 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 				coverData = data
 				return nil
 			}, isNotFoundError)
-			if err != nil {
-				t.logger.Warn("failed to download cover after retries",
-					zap.String("source", payload.Source),
+			if dlErr != nil {
+				t.logger.Warn("direct cover download failed, will try search fallback",
 					zap.String("pic_id", coverID),
-					zap.Int("max_retries", auxMaxRetries),
-					zap.Error(err))
+					zap.Error(dlErr))
+			} else {
+				directCoverResolved = true
+				t.logger.Debug("cover resolved directly via track_id", zap.String("cover_id", coverID))
+			}
+		} else if err != nil {
+			t.logger.Debug("direct cover resolve failed, will try search fallback",
+				zap.String("cover_id", coverID),
+				zap.Error(err))
+		}
+	}
+
+	// 第 2 步：直接解析失败时，通过搜索反查获取 pic_id / lyric_id
+	needSearchCover := !directCoverResolved && (payload.PicID == "" || payload.PicID == payload.TrackID)
+	needSearchLyric := payload.LyricID == ""
+	if needSearchCover || needSearchLyric {
+		resolvedPicID, resolvedLyricID, err := t.gdClient.ResolveAuxIDs(payload.Source, payload.TrackID, job.Title, job.Artist)
+		if err != nil {
+			t.logger.Debug("failed to resolve aux ids from search",
+				zap.String("source", payload.Source),
+				zap.String("track_id", payload.TrackID),
+				zap.String("title", job.Title),
+				zap.String("artist", job.Artist),
+				zap.Error(err))
+		} else {
+			if needSearchCover && resolvedPicID != "" {
+				coverID = resolvedPicID
+				// 用搜索到的 pic_id 重新解析封面
+				var resolvedCoverURL string
+				rErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+					url, e := t.gdClient.ResolveCover(payload.Source, coverID)
+					if e != nil {
+						return e
+					}
+					resolvedCoverURL = url
+					return nil
+				}, isNotFoundError)
+				if rErr != nil {
+					t.logger.Warn("failed to resolve cover via search pic_id",
+						zap.String("pic_id", coverID),
+						zap.Error(rErr))
+				} else if resolvedCoverURL != "" {
+					coverURL = resolvedCoverURL
+					dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+						data, e := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
+						if e != nil {
+							return e
+						}
+						coverData = data
+						return nil
+					}, isNotFoundError)
+					if dlErr != nil {
+						t.logger.Warn("failed to download cover via search pic_id",
+							zap.String("source", payload.Source),
+							zap.String("pic_id", coverID),
+							zap.Error(dlErr))
+					}
+				}
+			}
+			if needSearchLyric && resolvedLyricID != "" {
+				lyricID = resolvedLyricID
 			}
 		}
 	}
