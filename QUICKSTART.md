@@ -27,13 +27,14 @@ cp .env.example .env
 docker-compose up -d
 
 # 4. 查看日志
-docker-compose logs -f api worker
+docker-compose logs -f embed-service
 
 # 5. 健康检查
 curl http://localhost:8080/healthz
 
-# 6. 访问任务队列监控界面（可选）
-open http://localhost:8090
+# 6. 查询队列状态
+curl http://localhost:8080/v1/jobs \
+  -H "X-API-Key: dev-api-key-please-change-in-production"
 ```
 
 ### 2. 测试提交任务
@@ -66,13 +67,13 @@ curl http://localhost:8080/v1/jobs/job_abc123 \
 
 ```bash
 # macOS
-brew install taglib go redis
+brew install taglib go
 
 # Ubuntu
-sudo apt-get install libtag1-dev golang redis-server
+sudo apt-get install libtag1-dev golang
 
 # Arch Linux
-sudo pacman -S taglib go redis
+sudo pacman -S taglib go
 ```
 
 ### 2. 初始化项目
@@ -87,18 +88,10 @@ go mod init github.com/azin/gdstudio-embed-service
 # go mod tidy
 ```
 
-### 3. 启动依赖服务
+### 3. 准备本地目录
 
 ```bash
-# 启动 Redis
-docker run -d -p 6379:6379 redis:7-alpine
-
-# 启动 PostgreSQL（或使用 SQLite）
-docker run -d -p 5432:5432 \
-  -e POSTGRES_DB=embed_service \
-  -e POSTGRES_USER=embed \
-  -e POSTGRES_PASSWORD=embed_pass \
-  postgres:16-alpine
+mkdir -p /work/tmp /work/data /music/library
 ```
 
 ### 4. 运行服务
@@ -113,13 +106,12 @@ go run cmd/worker/main.go
 
 ## 📊 监控与管理
 
-### asynq 任务监控
+任务状态直接保存在内置 SQLite 中，可通过 API 查询：
 
-访问 http://localhost:8090 查看：
-- 队列中的任务数量
-- 任务执行成功率
-- 重试任务
-- 手动取消/重试任务
+```bash
+curl http://localhost:8080/v1/jobs \
+  -H "X-API-Key: dev-api-key-please-change-in-production"
+```
 
 ### Prometheus 指标
 
@@ -149,6 +141,7 @@ NAVIDROME_MUSIC_DIR=/path/to/navidrome/music  # 本机路径
 
 # Worker 并发数
 MAX_CONCURRENT_JOBS=3  # 根据服务器性能调整
+JOB_POLL_INTERVAL=2s
 
 # API 密钥（生产环境必须修改！）
 API_KEY=your-secure-random-key-here
@@ -207,11 +200,12 @@ RUN apk add --no-cache taglib-dev
 
 **检查**：
 ```bash
-# 查看 worker 日志
-docker-compose logs -f worker
+# 查看服务日志
+docker-compose logs -f embed-service
 
-# 检查 Redis 连接
-docker-compose exec redis redis-cli ping
+# 查看任务列表
+curl http://localhost:8080/v1/jobs \
+  -H "X-API-Key: dev-api-key-please-change-in-production"
 ```
 
 ## 📈 性能调优
@@ -227,15 +221,6 @@ deploy:
   replicas: 3  # 增加 worker 实例数
 ```
 
-### Redis 持久化
-
-编辑 `docker-compose.yml`：
-
-```yaml
-redis:
-  command: redis-server --appendonly yes
-```
-
 ## 🔐 生产部署建议
 
 1. **修改默认 API Key**
@@ -246,11 +231,9 @@ redis:
 
 2. **启用 HTTPS**（使用 Nginx/Caddy 反向代理）
 
-3. **配置 Redis Sentinel**（高可用）
+3. **定期备份 SQLite 数据库文件**
 
-4. **定期备份数据库**
-
-5. **配置监控告警**（Prometheus + Alertmanager）
+4. **配置监控告警**（Prometheus + Alertmanager）
 
 ## 📚 下一步
 

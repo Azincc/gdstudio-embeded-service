@@ -29,6 +29,7 @@ storage:
 
 worker:
   max_concurrent: 3
+  poll_interval: 2s
   download_timeout: 600s
   tag_write_timeout: 30s
   move_timeout: 10s
@@ -37,19 +38,11 @@ worker:
   retry_delay: 10s
 
 database:
-  driver: postgres  # sqlite / postgres
-  dsn: "postgres://embed:embed_pass@localhost:5432/embed_service?sslmode=disable"
-  # SQLite 配置示例：
-  # driver: sqlite
-  # dsn: "file:embed.db?cache=shared&mode=rwc"
-  max_idle_conns: 10
-  max_open_conns: 100
+  driver: sqlite
+  dsn: "file:/work/data/embed.db?_journal_mode=WAL&_busy_timeout=5000"
+  max_idle_conns: 1
+  max_open_conns: 1
   conn_max_lifetime: 3600s
-
-redis:
-  url: localhost:6379
-  db: 0
-  max_retries: 3
 
 security:
   api_keys:

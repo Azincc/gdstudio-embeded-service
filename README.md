@@ -11,7 +11,7 @@
 - 🎵 支持多音乐源（网易云、酷我、QQ 音乐等）
 - 🏷️ 自动写入元数据（ID3v2/FLAC VorbisComment）
 - 🖼️ 封面内嵌与歌词处理
-- 🔄 异步任务队列（基于 Redis）
+- 🔄 内置任务队列（基于 SQLite `jobs` 表轮询）
 - 🎯 幂等性保证（避免重复下载）
 - 📊 Prometheus 指标监控
 - 🐳 Docker 容器化部署
@@ -20,9 +20,9 @@
 ## 技术栈
 
 - **Web 框架**: Gin
-- **任务队列**: asynq (Redis)
+- **任务队列**: 内置轮询 Worker
 - **音频标签**: taglib
-- **数据库**: PostgreSQL/SQLite
+- **数据库**: SQLite
 - **日志**: zap (结构化日志)
 
 ## 快速开始
@@ -48,7 +48,7 @@ EOF
 docker-compose -f docker-compose.prod.yml up -d
 
 # 4. 检查状态
-curl http://localhost:8080/healthz
+curl http://localhost:5434/healthz
 ```
 
 **本地构建（开发环境）**:
@@ -66,7 +66,7 @@ cp .env.example .env
 docker-compose up -d --build
 
 # 4. 查看日志
-docker-compose logs -f api worker
+docker-compose logs -f embed-service
 ```
 
 📖 **详细部署文档**: [DOCKER_DEPLOYMENT.md](./DOCKER_DEPLOYMENT.md)
@@ -81,8 +81,8 @@ brew install taglib
 go mod init github.com/azin/gdstudio-embed-service
 go mod tidy
 
-# 3. 启动 Redis
-docker run -d -p 6379:6379 redis:7-alpine
+# 3. 准备目录
+mkdir -p /work/tmp /work/data /music/library
 
 # 4. 运行 API 服务
 go run cmd/api/main.go
@@ -193,11 +193,8 @@ worker:
 ## 环境变量
 
 ```bash
-# Redis
-REDIS_URL=localhost:6379
-
 # 数据库
-DATABASE_URL=postgres://user:pass@localhost:5432/embed_service
+DATABASE_URL=file:/work/data/embed.db?_journal_mode=WAL&_busy_timeout=5000
 
 # GDStudio API
 GD_API_BASE=https://music-api.gdstudio.xyz
@@ -209,6 +206,7 @@ NAVIDROME_TOKEN=your-token
 
 # Worker 配置
 MAX_CONCURRENT_JOBS=3
+JOB_POLL_INTERVAL=2s
 DOWNLOAD_TIMEOUT=600s
 LOG_LEVEL=info
 ```

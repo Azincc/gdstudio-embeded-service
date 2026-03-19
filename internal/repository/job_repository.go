@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 type JobRepository struct {
 	db *gorm.DB
 }
+
+var errJobAlreadyClaimed = errors.New("job already claimed")
 
 // NewJobRepository 创建任务仓库
 func NewJobRepository(db *gorm.DB) *JobRepository {
@@ -139,6 +142,52 @@ func (r *JobRepository) CountByStatus(status string) (int64, error) {
 	var count int64
 	err := r.db.Model(&model.Job{}).Where("status = ?", status).Count(&count).Error
 	return count, err
+}
+
+// ClaimNextQueued 原子领取一条最老的排队任务。
+func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
+	var claimed *model.Job
+
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var job model.Job
+		if err := tx.Where("status = ?", model.JobStatusQueued).
+			Order("created_at ASC").
+			First(&job).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return nil
+			}
+			return err
+		}
+
+		now := time.Now()
+		result := tx.Model(&model.Job{}).
+			Where("id = ? AND status = ?", job.ID, model.JobStatusQueued).
+			Updates(map[string]interface{}{
+				"status":     model.JobStatusResolving,
+				"message":    "",
+				"updated_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errJobAlreadyClaimed
+		}
+
+		job.Status = model.JobStatusResolving
+		job.Message = ""
+		job.UpdatedAt = now
+		claimed = &job
+		return nil
+	})
+	if errors.Is(err, errJobAlreadyClaimed) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return claimed, nil
 }
 
 // Delete 永久删除任务（用于 force 重新下载时清除幂等记录）

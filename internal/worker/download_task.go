@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,13 +17,10 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
-	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 )
 
 const (
-	TypeDownload = "download"
-
 	// 封面/歌词获取的重试参数
 	auxMaxRetries    = 3
 	auxRetryBaseWait = 1 * time.Second
@@ -74,13 +70,8 @@ func NewDownloadTask(
 	}
 }
 
-// ProcessTask 处理任务
-func (t *DownloadTask) ProcessTask(ctx context.Context, task *asynq.Task) error {
-	var payload DownloadPayload
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		return fmt.Errorf("unmarshal payload failed: %w", err)
-	}
-
+// ProcessPayload 处理任务。
+func (t *DownloadTask) ProcessPayload(ctx context.Context, payload *DownloadPayload) error {
 	t.logger.Info("processing download task",
 		zap.String("job_id", payload.JobID),
 		zap.String("source", payload.Source),
@@ -105,7 +96,7 @@ func (t *DownloadTask) ProcessTask(ctx context.Context, task *asynq.Task) error 
 		}
 
 		// 执行阶段
-		if err := stage.fn(ctx, &payload); err != nil {
+		if err := stage.fn(ctx, payload); err != nil {
 			t.logger.Error("stage failed",
 				zap.String("stage", stage.name),
 				zap.String("job_id", payload.JobID),
@@ -131,6 +122,32 @@ func (t *DownloadTask) ProcessTask(ctx context.Context, task *asynq.Task) error 
 
 	t.logger.Info("download task completed", zap.String("job_id", payload.JobID))
 	return nil
+}
+
+// PayloadFromJob 从数据库任务构造处理载荷。
+func PayloadFromJob(job *model.Job) *DownloadPayload {
+	if job == nil {
+		return nil
+	}
+
+	picID := job.PicID
+	if picID == "" {
+		picID = job.TrackID
+	}
+	lyricID := job.LyricID
+	if lyricID == "" {
+		lyricID = job.TrackID
+	}
+
+	return &DownloadPayload{
+		JobID:     job.ID,
+		Source:    job.Source,
+		TrackID:   job.TrackID,
+		PicID:     picID,
+		LyricID:   lyricID,
+		LibraryID: job.LibraryID,
+		Quality:   job.Quality,
+	}
 }
 
 // stageResolve 阶段1：解析元数据

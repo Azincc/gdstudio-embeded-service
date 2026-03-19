@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -9,33 +8,31 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
-	"github.com/azin/gdstudio-embed-service/internal/worker"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 )
 
 // JobHandler 任务处理器
 type JobHandler struct {
-	cfg    *config.Config
-	repo   *repository.JobRepository
-	client *asynq.Client
-	logger *zap.Logger
+	cfg     *config.Config
+	repo    *repository.JobRepository
+	logger  *zap.Logger
+	version string
 }
 
 // NewJobHandler 创建处理器
 func NewJobHandler(
 	cfg *config.Config,
 	repo *repository.JobRepository,
-	client *asynq.Client,
 	logger *zap.Logger,
+	version string,
 ) *JobHandler {
 	return &JobHandler{
-		cfg:    cfg,
-		repo:   repo,
-		client: client,
-		logger: logger,
+		cfg:     cfg,
+		repo:    repo,
+		logger:  logger,
+		version: version,
 	}
 }
 
@@ -148,41 +145,10 @@ func (h *JobHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// 创建任务载荷
-	picID := req.PicID
-	if picID == "" {
-		picID = req.TrackID
-	}
-	lyricID := req.LyricID
-	if lyricID == "" {
-		lyricID = req.TrackID
-	}
-
-	payload := worker.DownloadPayload{
-		JobID:     job.ID,
-		Source:    req.Source,
-		TrackID:   req.TrackID,
-		PicID:     picID,
-		LyricID:   lyricID,
-		LibraryID: req.LibraryID,
-		Quality:   req.Quality,
-	}
-
-	payloadBytes, _ := json.Marshal(payload)
-
-	// 入队
-	task := asynq.NewTask(worker.TypeDownload, payloadBytes)
-	info, err := h.client.Enqueue(task)
-	if err != nil {
-		h.logger.Error("failed to enqueue task", zap.Error(err))
-		h.repo.MarkFailed(job.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task"})
-		return
-	}
-
-	h.logger.Info("job created and enqueued",
+	h.logger.Info("job created and queued",
 		zap.String("job_id", job.ID),
-		zap.String("task_id", info.ID))
+		zap.String("source", job.Source),
+		zap.String("track_id", job.TrackID))
 
 	c.JSON(http.StatusOK, CreateJobResponse{
 		JobID:   job.ID,
@@ -256,34 +222,6 @@ func (h *JobHandler) Retry(c *gin.Context) {
 
 	if err := h.repo.Update(job); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update job"})
-		return
-	}
-
-	// 重新入队
-	picID := job.PicID
-	if picID == "" {
-		picID = job.TrackID
-	}
-	lyricID := job.LyricID
-	if lyricID == "" {
-		lyricID = job.TrackID
-	}
-
-	payload := worker.DownloadPayload{
-		JobID:     job.ID,
-		Source:    job.Source,
-		TrackID:   job.TrackID,
-		PicID:     picID,
-		LyricID:   lyricID,
-		LibraryID: job.LibraryID,
-		Quality:   job.Quality,
-	}
-
-	payloadBytes, _ := json.Marshal(payload)
-	task := asynq.NewTask(worker.TypeDownload, payloadBytes)
-
-	if _, err := h.client.Enqueue(task); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task"})
 		return
 	}
 
@@ -395,11 +333,11 @@ func (h *JobHandler) Health(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "healthy",
-		"version": "1.0.0-m1",
+		"version": h.version,
 		"uptime":  time.Since(time.Now()).Seconds(),
 		"components": gin.H{
 			"database": "healthy",
-			"queue":    "healthy",
+			"queue":    "embedded",
 		},
 		"stats": gin.H{
 			"queued_jobs": count,

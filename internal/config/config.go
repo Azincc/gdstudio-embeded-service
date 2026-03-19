@@ -2,8 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +16,6 @@ type Config struct {
 	Storage     StorageConfig     `mapstructure:"storage"`
 	Worker      WorkerConfig      `mapstructure:"worker"`
 	Database    DatabaseConfig    `mapstructure:"database"`
-	Redis       RedisConfig       `mapstructure:"redis"`
 	Security    SecurityConfig    `mapstructure:"security"`
 	Logging     LoggingConfig     `mapstructure:"logging"`
 	Metrics     MetricsConfig     `mapstructure:"metrics"`
@@ -54,6 +51,7 @@ type StorageConfig struct {
 
 type WorkerConfig struct {
 	MaxConcurrent    int           `mapstructure:"max_concurrent"`
+	PollInterval     time.Duration `mapstructure:"poll_interval"`
 	DownloadTimeout  time.Duration `mapstructure:"download_timeout"`
 	TagWriteTimeout  time.Duration `mapstructure:"tag_write_timeout"`
 	MoveTimeout      time.Duration `mapstructure:"move_timeout"`
@@ -63,17 +61,11 @@ type WorkerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver          string        `mapstructure:"driver"` // sqlite / postgres
+	Driver          string        `mapstructure:"driver"` // sqlite
 	DSN             string        `mapstructure:"dsn"`
 	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
 	MaxOpenConns    int           `mapstructure:"max_open_conns"`
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
-}
-
-type RedisConfig struct {
-	URL        string `mapstructure:"url"`
-	DB         int    `mapstructure:"db"`
-	MaxRetries int    `mapstructure:"max_retries"`
 }
 
 type SecurityConfig struct {
@@ -142,8 +134,8 @@ func Load(configPath string) (*Config, error) {
 	v.BindEnv("navidrome.username", "NAVIDROME_USER")
 	v.BindEnv("navidrome.password", "NAVIDROME_PASSWORD")
 	v.BindEnv("database.dsn", "DATABASE_URL")
-	v.BindEnv("redis.url", "REDIS_URL")
 	v.BindEnv("worker.max_concurrent", "MAX_CONCURRENT_JOBS")
+	v.BindEnv("worker.poll_interval", "JOB_POLL_INTERVAL")
 	v.BindEnv("worker.download_timeout", "DOWNLOAD_TIMEOUT")
 	v.BindEnv("logging.level", "LOG_LEVEL")
 	v.BindEnv("musicbrainz.enabled", "MUSICBRAINZ_ENABLED")
@@ -164,6 +156,7 @@ func Load(configPath string) (*Config, error) {
 		"gdstudio.timeout",
 		"navidrome.scan_timeout",
 		"worker.download_timeout",
+		"worker.poll_interval",
 		"worker.tag_write_timeout",
 		"worker.move_timeout",
 		"worker.scan_timeout",
@@ -182,11 +175,6 @@ func Load(configPath string) (*Config, error) {
 
 	// 从环境变量覆盖首个 API Key，便于 Docker Compose 从 .env 注入。
 	applyAPIKeyOverride(v, &cfg)
-
-	// 兼容 REDIS_URL 同时支持 host:port 与 redis://host:port/db
-	if err := normalizeRedisAddress(&cfg.Redis); err != nil {
-		return nil, fmt.Errorf("failed to parse redis config: %w", err)
-	}
 
 	return &cfg, nil
 }
@@ -207,8 +195,26 @@ func setDefaults(cfg *Config) {
 	if cfg.Worker.MaxConcurrent == 0 {
 		cfg.Worker.MaxConcurrent = 3
 	}
+	if cfg.Worker.PollInterval == 0 {
+		cfg.Worker.PollInterval = 2 * time.Second
+	}
 	if cfg.Worker.DownloadTimeout == 0 {
 		cfg.Worker.DownloadTimeout = 600 * time.Second
+	}
+	if cfg.Database.Driver == "" {
+		cfg.Database.Driver = "sqlite"
+	}
+	if cfg.Database.DSN == "" {
+		cfg.Database.DSN = "file:/work/data/embed.db?_journal_mode=WAL&_busy_timeout=5000"
+	}
+	if cfg.Database.MaxIdleConns == 0 {
+		cfg.Database.MaxIdleConns = 1
+	}
+	if cfg.Database.MaxOpenConns == 0 {
+		cfg.Database.MaxOpenConns = 1
+	}
+	if cfg.Database.ConnMaxLifetime == 0 {
+		cfg.Database.ConnMaxLifetime = time.Hour
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
@@ -292,48 +298,4 @@ func isDigits(s string) bool {
 		}
 	}
 	return s != ""
-}
-
-func normalizeRedisAddress(redisCfg *RedisConfig) error {
-	raw := strings.TrimSpace(redisCfg.URL)
-	if raw == "" {
-		return nil
-	}
-
-	// asynq 的 Addr 需要 host:port；若已经是该格式则直接使用
-	if !strings.Contains(raw, "://") {
-		redisCfg.URL = raw
-		return nil
-	}
-
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("invalid REDIS_URL %q: %w", raw, err)
-	}
-
-	if u.Scheme != "redis" && u.Scheme != "rediss" {
-		return fmt.Errorf("unsupported REDIS_URL scheme %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("invalid REDIS_URL %q: missing host", raw)
-	}
-
-	redisCfg.URL = u.Host
-
-	// 若未单独配置 DB，则尝试从 /<db> 提取
-	if redisCfg.DB != 0 {
-		return nil
-	}
-	path := strings.Trim(u.Path, "/")
-	if path == "" {
-		return nil
-	}
-
-	db, err := strconv.Atoi(path)
-	if err != nil || db < 0 {
-		return fmt.Errorf("invalid REDIS_URL database index %q", path)
-	}
-	redisCfg.DB = db
-
-	return nil
 }
