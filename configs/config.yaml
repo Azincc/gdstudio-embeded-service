@@ -76,3 +76,14 @@ metrics:
   enabled: true
   port: 9091
   path: /metrics
+
+musicbrainz:
+  enabled: false
+  base_url: https://musicbrainz.org/ws/2
+  cover_art_url: https://coverartarchive.org
+  acoustid_url: https://api.acoustid.org/v2
+  acoustid_client: ""
+  user_agent: EchoEmbedService/1.0 (your-email@example.com)
+  rate_limit_ms: 1100
+  timeout: 10s
+  retry_count: 3

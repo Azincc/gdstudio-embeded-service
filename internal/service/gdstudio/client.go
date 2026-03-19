@@ -54,11 +54,22 @@ type LyricResult struct {
 	Translation string `json:"tlyric"`
 }
 
-// ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
-func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, string, error) {
+// MetadataResult GDStudio 搜索返回的可写元数据。
+type MetadataResult struct {
+	Title       string
+	Artist      string
+	Album       string
+	TrackNumber int
+	Year        int
+	PicID       string
+	LyricID     string
+}
+
+// ResolveMetadata 通过搜索结果反查曲目元数据、pic_id、lyric_id。
+func (c *Client) ResolveMetadata(source, trackID, title, artist string) (*MetadataResult, error) {
 	keywords := buildSearchKeywords(trackID, title, artist)
 	if len(keywords) == 0 {
-		return "", "", fmt.Errorf("search keyword is empty")
+		return nil, fmt.Errorf("search keyword is empty")
 	}
 
 	var lastErr error
@@ -72,21 +83,34 @@ func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, s
 			continue
 		}
 
-		if picID, lyricID, ok := pickAuxIDs(items, trackID, title, artist); ok {
-			c.logger.Debug("resolved aux ids",
+		if metadata, ok := pickMetadata(items, trackID, title, artist); ok {
+			c.logger.Debug("resolved metadata from gdstudio search",
 				zap.String("source", source),
 				zap.String("track_id", trackID),
-				zap.String("pic_id", picID),
-				zap.String("lyric_id", lyricID),
+				zap.String("title", metadata.Title),
+				zap.String("artist", metadata.Artist),
+				zap.String("album", metadata.Album),
+				zap.String("pic_id", metadata.PicID),
+				zap.String("lyric_id", metadata.LyricID),
 				zap.String("keyword", keyword))
-			return picID, lyricID, nil
+			return metadata, nil
 		}
 	}
 
 	if lastErr != nil {
-		return "", "", lastErr
+		return nil, lastErr
 	}
-	return "", "", fmt.Errorf("aux ids not found from search")
+	return nil, fmt.Errorf("metadata not found from search")
+}
+
+// ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
+func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, string, error) {
+	metadata, err := c.ResolveMetadata(source, trackID, title, artist)
+	if err != nil {
+		return "", "", err
+	}
+
+	return metadata.PicID, metadata.LyricID, nil
 }
 
 // ResolveURL 解析播放链接
@@ -504,6 +528,14 @@ func (c *Client) searchTracks(source, keyword string) ([]map[string]interface{},
 }
 
 func pickAuxIDs(items []map[string]interface{}, trackID, title, artist string) (string, string, bool) {
+	metadata, ok := pickMetadata(items, trackID, title, artist)
+	if !ok {
+		return "", "", false
+	}
+	return metadata.PicID, metadata.LyricID, true
+}
+
+func pickMetadata(items []map[string]interface{}, trackID, title, artist string) (*MetadataResult, bool) {
 	normalizedTitle := strings.TrimSpace(title)
 	normalizedArtist := strings.TrimSpace(artist)
 
@@ -513,10 +545,9 @@ func pickAuxIDs(items []map[string]interface{}, trackID, title, artist string) (
 		if trackID == "" || id != trackID {
 			continue
 		}
-		picID := toString(item["pic_id"])
-		lyricID := toString(item["lyric_id"])
-		if picID != "" || lyricID != "" {
-			return picID, lyricID, true
+		metadata := metadataFromSearchItem(item)
+		if metadata != nil {
+			return metadata, true
 		}
 	}
 
@@ -545,16 +576,99 @@ func pickAuxIDs(items []map[string]interface{}, trackID, title, artist string) (
 					continue
 				}
 			}
-			picID := toString(item["pic_id"])
-			lyricID := toString(item["lyric_id"])
-			if picID != "" || lyricID != "" {
-				return picID, lyricID, true
+			metadata := metadataFromSearchItem(item)
+			if metadata != nil {
+				return metadata, true
 			}
 		}
 	}
 
 	// 不再盲目返回第一条有 pic_id 的结果，避免返回无关歌曲的封面。
-	return "", "", false
+	return nil, false
+}
+
+func metadataFromSearchItem(item map[string]interface{}) *MetadataResult {
+	if len(item) == 0 {
+		return nil
+	}
+
+	return &MetadataResult{
+		Title:       firstNonEmpty(toString(item["name"]), toString(item["title"])),
+		Artist:      searchArtistName(item["artist"]),
+		Album:       searchAlbumName(item["album"]),
+		TrackNumber: firstPositiveInt(item["track_number"], item["trackNumber"], item["no"]),
+		Year:        searchYear(item),
+		PicID:       toString(item["pic_id"]),
+		LyricID:     toString(item["lyric_id"]),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstPositiveInt(values ...interface{}) int {
+	for _, value := range values {
+		if n := toInt(value); n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+func searchArtistName(raw interface{}) string {
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []interface{}:
+		names := make([]string, 0, len(val))
+		for _, item := range val {
+			if artistMap, ok := item.(map[string]interface{}); ok {
+				if name := firstNonEmpty(toString(artistMap["name"]), toString(artistMap["artistName"])); name != "" {
+					names = append(names, name)
+				}
+			} else if name := toString(item); name != "" {
+				names = append(names, name)
+			}
+		}
+		return strings.Join(names, " / ")
+	case map[string]interface{}:
+		return firstNonEmpty(toString(val["name"]), toString(val["artistName"]))
+	default:
+		return toString(raw)
+	}
+}
+
+func searchAlbumName(raw interface{}) string {
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case map[string]interface{}:
+		return firstNonEmpty(toString(val["name"]), toString(val["title"]))
+	default:
+		return toString(raw)
+	}
+}
+
+func searchYear(item map[string]interface{}) int {
+	if year := firstPositiveInt(item["year"]); year > 0 {
+		return year
+	}
+	for _, key := range []string{"publishTime", "publish_time", "date", "publishDate"} {
+		raw := toString(item[key])
+		if len(raw) >= 4 {
+			if year := toInt(raw[:4]); year > 0 {
+				return year
+			}
+		}
+	}
+	return 0
 }
 
 func toString(v interface{}) string {
@@ -576,6 +690,29 @@ func toString(v interface{}) string {
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", val))
 	}
+}
+
+func toInt(v interface{}) int {
+	switch val := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return val
+	case int8, int16, int32, int64:
+		return int(reflect.ValueOf(val).Int())
+	case uint, uint8, uint16, uint32, uint64:
+		return int(reflect.ValueOf(val).Uint())
+	case float32:
+		return int(val)
+	case float64:
+		return int(val)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // extractExtension 提取文件扩展名

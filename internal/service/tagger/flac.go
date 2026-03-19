@@ -24,7 +24,15 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 		"--remove-tag=ALBUMARTIST",
 		"--remove-tag=ALBUM",
 		"--remove-tag=TRACKNUMBER",
+		"--remove-tag=DISCNUMBER",
 		"--remove-tag=DATE",
+		"--remove-tag=GENRE",
+		"--remove-tag=COMPOSER",
+		"--remove-tag=LABEL",
+		"--remove-tag=COMMENT",
+		"--remove-tag=MUSICBRAINZ_RECORDINGID",
+		"--remove-tag=MUSICBRAINZ_ALBUMID",
+		"--remove-tag=MUSICBRAINZ_RELEASEGROUPID",
 		"--remove-tag=LYRICS",
 		"--remove-tag=LYRICS_TRANSLATED",
 		filePath,
@@ -49,9 +57,21 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 	if metadata.TrackNumber > 0 {
 		addTag("TRACKNUMBER", strconv.Itoa(metadata.TrackNumber))
 	}
-	if metadata.Year > 0 {
+	if metadata.DiscNumber > 0 {
+		addTag("DISCNUMBER", strconv.Itoa(metadata.DiscNumber))
+	}
+	if metadata.Date != "" {
+		addTag("DATE", metadata.Date)
+	} else if metadata.Year > 0 {
 		addTag("DATE", strconv.Itoa(metadata.Year))
 	}
+	addTag("GENRE", metadata.Genre)
+	addTag("COMPOSER", metadata.Composer)
+	addTag("LABEL", metadata.Label)
+	addTag("COMMENT", metadata.Comment)
+	addTag("MUSICBRAINZ_RECORDINGID", metadata.MusicBrainzRecordingID)
+	addTag("MUSICBRAINZ_ALBUMID", metadata.MusicBrainzReleaseID)
+	addTag("MUSICBRAINZ_RELEASEGROUPID", metadata.MusicBrainzReleaseGroupID)
 	addTag("LYRICS", metadata.Lyrics)
 	addTag("LYRICS_TRANSLATED", metadata.Translation)
 

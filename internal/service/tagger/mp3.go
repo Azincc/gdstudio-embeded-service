@@ -33,7 +33,7 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 
 	// 写入 Album Artist (TPE2)
 	if metadata.AlbumArtist != "" {
-		tag.AddTextFrame(tag.CommonID("Band/orchestra/accompaniment"),
+		tag.AddTextFrame(tag.CommonID("Band/Orchestra/Accompaniment"),
 			tag.DefaultEncoding(), metadata.AlbumArtist)
 	}
 
@@ -43,9 +43,54 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 			fmt.Sprintf("%d", metadata.TrackNumber))
 	}
 
+	if metadata.DiscNumber > 0 {
+		tag.AddTextFrame(tag.CommonID("Part of a set"),
+			tag.DefaultEncoding(),
+			fmt.Sprintf("%d", metadata.DiscNumber))
+	}
+
 	if metadata.Year > 0 {
 		tag.SetYear(fmt.Sprintf("%d", metadata.Year))
 	}
+	if metadata.Date != "" {
+		tag.AddTextFrame(tag.CommonID("Recording time"),
+			tag.DefaultEncoding(), metadata.Date)
+	}
+	if metadata.Genre != "" {
+		tag.AddTextFrame(tag.CommonID("Content type"),
+			tag.DefaultEncoding(), metadata.Genre)
+	}
+	if metadata.Composer != "" {
+		tag.AddTextFrame(tag.CommonID("Composer"),
+			tag.DefaultEncoding(), metadata.Composer)
+	}
+	if metadata.Label != "" {
+		tag.AddTextFrame(tag.CommonID("Publisher"),
+			tag.DefaultEncoding(), metadata.Label)
+	}
+	if metadata.Comment != "" {
+		tag.AddCommentFrame(id3v2.CommentFrame{
+			Encoding:    id3v2.EncodingUTF8,
+			Language:    "eng",
+			Description: "Comment",
+			Text:        metadata.Comment,
+		})
+	}
+
+	addUserTextFrame := func(description, value string) {
+		if value == "" {
+			return
+		}
+		tag.AddUserDefinedTextFrame(id3v2.UserDefinedTextFrame{
+			Encoding:    id3v2.EncodingUTF8,
+			Description: description,
+			Value:       value,
+		})
+	}
+	addUserTextFrame("MusicBrainz Recording Id", metadata.MusicBrainzRecordingID)
+	addUserTextFrame("MusicBrainz Album Id", metadata.MusicBrainzReleaseID)
+	addUserTextFrame("MusicBrainz Release Group Id", metadata.MusicBrainzReleaseGroupID)
+	addUserTextFrame("Lyrics Translation", metadata.Translation)
 
 	// 写入封面
 	if len(metadata.CoverData) > 0 {

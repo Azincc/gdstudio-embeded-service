@@ -58,16 +58,25 @@ func (Job) TableName() string {
 
 // TrackMetadata 曲目元数据
 type TrackMetadata struct {
-	Title       string
-	Artist      string
-	AlbumArtist string
-	Album       string
-	TrackNumber int
-	Year        int
-	CoverURL    string
-	CoverData   []byte
-	Lyrics      string
-	Translation string // 翻译歌词
+	Title                     string
+	Artist                    string
+	AlbumArtist               string
+	Album                     string
+	TrackNumber               int
+	DiscNumber                int
+	Year                      int
+	Date                      string
+	Genre                     string
+	Composer                  string
+	Label                     string
+	Comment                   string
+	MusicBrainzRecordingID    string
+	MusicBrainzReleaseID      string
+	MusicBrainzReleaseGroupID string
+	CoverURL                  string
+	CoverData                 []byte
+	Lyrics                    string
+	Translation               string // 翻译歌词
 }
 
 // JobStatus 任务状态常量

@@ -107,11 +107,15 @@ type MetricsConfig struct {
 
 // MusicBrainzConfig MusicBrainz 元数据查询配置（可选）
 type MusicBrainzConfig struct {
-	Enabled       bool          `mapstructure:"enabled"`
-	BaseURL       string        `mapstructure:"base_url"`
-	UserAgent     string        `mapstructure:"user_agent"`
-	RateLimitMs   int           `mapstructure:"rate_limit_ms"`
-	Timeout       time.Duration `mapstructure:"timeout"`
+	Enabled        bool          `mapstructure:"enabled"`
+	BaseURL        string        `mapstructure:"base_url"`
+	CoverArtURL    string        `mapstructure:"cover_art_url"`
+	AcoustIDURL    string        `mapstructure:"acoustid_url"`
+	AcoustIDClient string        `mapstructure:"acoustid_client"`
+	UserAgent      string        `mapstructure:"user_agent"`
+	RateLimitMs    int           `mapstructure:"rate_limit_ms"`
+	Timeout        time.Duration `mapstructure:"timeout"`
+	RetryCount     int           `mapstructure:"retry_count"`
 }
 
 // Load 加载配置
@@ -143,7 +147,12 @@ func Load(configPath string) (*Config, error) {
 	v.BindEnv("worker.download_timeout", "DOWNLOAD_TIMEOUT")
 	v.BindEnv("logging.level", "LOG_LEVEL")
 	v.BindEnv("musicbrainz.enabled", "MUSICBRAINZ_ENABLED")
+	v.BindEnv("musicbrainz.base_url", "MUSICBRAINZ_BASE_URL")
+	v.BindEnv("musicbrainz.cover_art_url", "COVERARTARCHIVE_BASE_URL")
+	v.BindEnv("musicbrainz.acoustid_url", "ACOUSTID_BASE_URL")
+	v.BindEnv("musicbrainz.acoustid_client", "ACOUSTID_CLIENT")
 	v.BindEnv("musicbrainz.user_agent", "MUSICBRAINZ_USER_AGENT")
+	v.BindEnv("musicbrainz.retry_count", "MUSICBRAINZ_RETRY_COUNT")
 
 	// 读取配置文件
 	if err := v.ReadInConfig(); err != nil {
@@ -213,6 +222,12 @@ func setDefaults(cfg *Config) {
 	if cfg.MusicBrainz.BaseURL == "" {
 		cfg.MusicBrainz.BaseURL = "https://musicbrainz.org/ws/2"
 	}
+	if cfg.MusicBrainz.CoverArtURL == "" {
+		cfg.MusicBrainz.CoverArtURL = "https://coverartarchive.org"
+	}
+	if cfg.MusicBrainz.AcoustIDURL == "" {
+		cfg.MusicBrainz.AcoustIDURL = "https://api.acoustid.org/v2"
+	}
 	if cfg.MusicBrainz.UserAgent == "" {
 		cfg.MusicBrainz.UserAgent = "EchoEmbedService/1.0 (https://github.com/Azincc/gdstudio-embeded-service)"
 	}
@@ -221,6 +236,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.MusicBrainz.Timeout == 0 {
 		cfg.MusicBrainz.Timeout = 10 * time.Second
+	}
+	if cfg.MusicBrainz.RetryCount == 0 {
+		cfg.MusicBrainz.RetryCount = 3
 	}
 }
 

@@ -26,9 +26,9 @@ const (
 	TypeDownload = "download"
 
 	// 封面/歌词获取的重试参数
-	auxMaxRetries    = 10
+	auxMaxRetries    = 3
 	auxRetryBaseWait = 1 * time.Second
-	auxMaxWait       = 60 * time.Second
+	auxMaxWait       = 8 * time.Second
 )
 
 // DownloadPayload 下载任务载荷
@@ -249,8 +249,6 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		return fmt.Errorf("failed to find job: %w", err)
 	}
 
-	// 解析封面（最佳努力，不阻塞主流程）。
-	// 策略：先用 trackID 直接解析封面，成功则跳过搜索；失败再走搜索反查。
 	coverID := payload.PicID
 	if coverID == "" {
 		coverID = payload.TrackID
@@ -260,100 +258,100 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		lyricID = payload.TrackID
 	}
 
-	// 第 1 步：尝试用 trackID 直接解析封面 URL
 	var coverURL string
 	var coverData []byte
-	directCoverResolved := false
-	if coverID != "" {
-		var resolvedCoverURL string
+	var brainzMeta *musicbrainz.FingerprintMetadata
+	if t.mbClient != nil {
 		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-			url, e := t.gdClient.ResolveCover(payload.Source, coverID)
-			if e != nil {
-				return e
+			resolved, lookupErr := t.mbClient.LookupTrackMetadataByFingerprint(job.FilePath)
+			if lookupErr != nil {
+				return lookupErr
 			}
-			resolvedCoverURL = url
+			brainzMeta = resolved
 			return nil
-		}, isNotFoundError)
-		if err == nil && resolvedCoverURL != "" {
-			// 直接解析成功，下载封面
-			coverURL = resolvedCoverURL
-			dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-				data, e := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
-				if e != nil {
-					return e
-				}
-				coverData = data
-				return nil
-			}, isNotFoundError)
-			if dlErr != nil {
-				t.logger.Warn("direct cover download failed, will try search fallback",
-					zap.String("pic_id", coverID),
-					zap.Error(dlErr))
-			} else {
-				directCoverResolved = true
-				t.logger.Debug("cover resolved directly via track_id", zap.String("cover_id", coverID))
-			}
-		} else if err != nil {
-			t.logger.Debug("direct cover resolve failed, will try search fallback",
-				zap.String("cover_id", coverID),
+		}, nil)
+		if err != nil {
+			t.logger.Warn("brainz metadata lookup failed, falling back to gdstudio",
+				zap.String("job_id", payload.JobID),
 				zap.Error(err))
+		} else if brainzMeta != nil {
+			applyFingerprintMetadata(job, brainzMeta)
+			coverURL = brainzMeta.CoverURL
+			coverData = brainzMeta.CoverData
 		}
 	}
 
-	// 第 2 步：直接解析失败时，通过搜索反查获取 pic_id / lyric_id
-	needSearchCover := !directCoverResolved && (payload.PicID == "" || payload.PicID == payload.TrackID)
-	needSearchLyric := payload.LyricID == ""
-	if needSearchCover || needSearchLyric {
-		resolvedPicID, resolvedLyricID, err := t.gdClient.ResolveAuxIDs(payload.Source, payload.TrackID, job.Title, job.Artist)
+	var gdMeta *gdstudio.MetadataResult
+	if shouldResolveGDMetadata(job, payload.TrackID, coverID, lyricID, brainzMeta) {
+		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+			resolved, lookupErr := t.gdClient.ResolveMetadata(payload.Source, payload.TrackID, job.Title, job.Artist)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			gdMeta = resolved
+			return nil
+		}, nil)
 		if err != nil {
-			t.logger.Debug("failed to resolve aux ids from search",
+			t.logger.Warn("gdstudio metadata lookup failed",
+				zap.String("job_id", payload.JobID),
 				zap.String("source", payload.Source),
 				zap.String("track_id", payload.TrackID),
-				zap.String("title", job.Title),
-				zap.String("artist", job.Artist),
 				zap.Error(err))
-		} else {
-			if needSearchCover && resolvedPicID != "" {
-				coverID = resolvedPicID
-				// 用搜索到的 pic_id 重新解析封面
-				var resolvedCoverURL string
-				rErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-					url, e := t.gdClient.ResolveCover(payload.Source, coverID)
-					if e != nil {
-						return e
-					}
-					resolvedCoverURL = url
-					return nil
-				}, isNotFoundError)
-				if rErr != nil {
-					t.logger.Warn("failed to resolve cover via search pic_id",
-						zap.String("pic_id", coverID),
-						zap.Error(rErr))
-				} else if resolvedCoverURL != "" {
-					coverURL = resolvedCoverURL
-					dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-						data, e := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
-						if e != nil {
-							return e
-						}
-						coverData = data
-						return nil
-					}, isNotFoundError)
-					if dlErr != nil {
-						t.logger.Warn("failed to download cover via search pic_id",
-							zap.String("source", payload.Source),
-							zap.String("pic_id", coverID),
-							zap.Error(dlErr))
-					}
-				}
+		} else if gdMeta != nil {
+			applyGDMetadata(job, gdMeta)
+			if gdMeta.PicID != "" && (coverID == "" || coverID == payload.TrackID || coverID == payload.PicID) {
+				coverID = gdMeta.PicID
 			}
-			if needSearchLyric && resolvedLyricID != "" {
-				lyricID = resolvedLyricID
+			if gdMeta.LyricID != "" && (lyricID == "" || lyricID == payload.TrackID || lyricID == payload.LyricID) {
+				lyricID = gdMeta.LyricID
 			}
 		}
 	}
 
-	// 带重试的歌词解析
+	if len(coverData) == 0 {
+		resolvedCoverID := coverID
+		if resolvedCoverID == "" && gdMeta != nil {
+			resolvedCoverID = gdMeta.PicID
+		}
+		if resolvedCoverID == "" {
+			resolvedCoverID = payload.TrackID
+		}
+		if resolvedCoverID != "" {
+			var resolvedCoverURL string
+			err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+				url, resolveErr := t.gdClient.ResolveCover(payload.Source, resolvedCoverID)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				resolvedCoverURL = url
+				return nil
+			}, nil)
+			if err != nil {
+				t.logger.Warn("gdstudio cover resolve failed",
+					zap.String("source", payload.Source),
+					zap.String("pic_id", resolvedCoverID),
+					zap.Error(err))
+			} else if resolvedCoverURL != "" {
+				coverURL = resolvedCoverURL
+				dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+					data, downloadErr := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
+					if downloadErr != nil {
+						return downloadErr
+					}
+					coverData = data
+					return nil
+				}, nil)
+				if dlErr != nil {
+					t.logger.Warn("gdstudio cover download failed",
+						zap.String("source", payload.Source),
+						zap.String("pic_id", resolvedCoverID),
+						zap.String("cover_url", resolvedCoverURL),
+						zap.Error(dlErr))
+				}
+			}
+		}
+	}
+
 	var lyrics string
 	var translation string
 	if lyricID != "" {
@@ -365,7 +363,7 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 			}
 			lyricResult = result
 			return nil
-		}, isNotFoundError)
+		}, nil)
 		if err != nil {
 			t.logger.Warn("failed to resolve lyrics after retries", zap.Int("max_retries", auxMaxRetries), zap.Error(err))
 		} else if lyricResult != nil {
@@ -374,8 +372,18 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		}
 	}
 
-	// 查询 Album Artist（MusicBrainz + fallback）
-	albumArtist := t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
+	if coverID != "" {
+		job.PicID = coverID
+	}
+	if lyricID != "" {
+		job.LyricID = lyricID
+	}
+
+	albumArtist := job.AlbumArtist
+	if albumArtist == "" {
+		albumArtist = t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
+		job.AlbumArtist = albumArtist
+	}
 
 	// 构建元数据
 	metadata := &model.TrackMetadata{
@@ -390,13 +398,15 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		Lyrics:      lyrics,
 		Translation: translation,
 	}
-
-	// 持久化 AlbumArtist 到 Job
-	if albumArtist != "" && job.AlbumArtist != albumArtist {
-		job.AlbumArtist = albumArtist
-		if err := t.repo.Update(job); err != nil {
-			t.logger.Warn("failed to persist album artist", zap.Error(err))
-		}
+	if brainzMeta != nil {
+		metadata.DiscNumber = brainzMeta.DiscNumber
+		metadata.Date = brainzMeta.Date
+		metadata.MusicBrainzRecordingID = brainzMeta.MusicBrainzRecordingID
+		metadata.MusicBrainzReleaseID = brainzMeta.MusicBrainzReleaseID
+		metadata.MusicBrainzReleaseGroupID = brainzMeta.MusicBrainzReleaseGroupID
+	}
+	if err := t.repo.Update(job); err != nil {
+		t.logger.Warn("failed to persist enriched metadata", zap.Error(err))
 	}
 
 	// 写入标签
@@ -413,6 +423,66 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	return nil
+}
+
+func shouldResolveGDMetadata(job *model.Job, trackID, coverID, lyricID string, brainzMeta *musicbrainz.FingerprintMetadata) bool {
+	if brainzMeta == nil {
+		return true
+	}
+	return job.Title == "" ||
+		job.Artist == "" ||
+		job.Album == "" ||
+		job.TrackNumber == 0 ||
+		job.Year == 0 ||
+		coverID == "" ||
+		coverID == trackID ||
+		lyricID == "" ||
+		lyricID == trackID
+}
+
+func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintMetadata) {
+	if metadata == nil {
+		return
+	}
+	if metadata.Title != "" {
+		job.Title = metadata.Title
+	}
+	if metadata.Artist != "" {
+		job.Artist = metadata.Artist
+	}
+	if metadata.AlbumArtist != "" {
+		job.AlbumArtist = metadata.AlbumArtist
+	}
+	if metadata.Album != "" {
+		job.Album = metadata.Album
+	}
+	if metadata.TrackNumber > 0 {
+		job.TrackNumber = metadata.TrackNumber
+	}
+	if metadata.Year > 0 {
+		job.Year = metadata.Year
+	}
+}
+
+func applyGDMetadata(job *model.Job, metadata *gdstudio.MetadataResult) {
+	if metadata == nil {
+		return
+	}
+	if job.Title == "" && metadata.Title != "" {
+		job.Title = metadata.Title
+	}
+	if job.Artist == "" && metadata.Artist != "" {
+		job.Artist = metadata.Artist
+	}
+	if job.Album == "" && metadata.Album != "" {
+		job.Album = metadata.Album
+	}
+	if job.TrackNumber == 0 && metadata.TrackNumber > 0 {
+		job.TrackNumber = metadata.TrackNumber
+	}
+	if job.Year == 0 && metadata.Year > 0 {
+		job.Year = metadata.Year
+	}
 }
 
 // stageMoving 阶段4：移动到目标目录
@@ -581,13 +651,10 @@ func (t *DownloadTask) moveSidecar(srcAudioPath, dstAudioPath, ext string) error
 // buildTargetPath 构建目标路径
 func (t *DownloadTask) buildTargetPath(job *model.Job) string {
 	// 优先使用 AlbumArtist 作为目录名，保证同一专辑的歌曲在同一目录
-	artistDir := job.AlbumArtist
-	if artistDir == "" {
-		artistDir = job.Artist
-	}
+	artistDir := firstNonEmptyString(job.AlbumArtist, job.Artist, "Unknown Artist")
 	cleanArtist := sanitizeFilename(artistDir)
-	cleanAlbum := sanitizeFilename(job.Album)
-	cleanTitle := sanitizeFilename(job.Title)
+	cleanAlbum := sanitizeFilename(firstNonEmptyString(job.Album, "Unknown Album"))
+	cleanTitle := sanitizeFilename(firstNonEmptyString(job.Title, job.TrackID, job.ID))
 
 	ext := filepath.Ext(job.FilePath)
 	filename := fmt.Sprintf("%02d - %s%s", job.TrackNumber, cleanTitle, ext)
@@ -686,6 +753,16 @@ func sanitizeFilename(name string) string {
 		result = strings.ReplaceAll(result, char, "_")
 	}
 	return strings.TrimSpace(result)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // resolveAlbumArtist 查询 Album Artist：MusicBrainz → fallback 第一艺术家
