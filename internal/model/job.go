@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -21,9 +22,11 @@ type Job struct {
 	Title       string `gorm:"size:255" json:"title"`
 	Artist      string `gorm:"size:255" json:"artist"`
 	AlbumArtist string `gorm:"size:255" json:"album_artist"`
-	Album       string `gorm:"size:255" json:"album"`
-	TrackNumber int    `json:"track_number"`
-	Year        int    `json:"year"`
+	// AlbumArtistSource 标记专辑歌手的来源，用于区分可靠专辑级信息和单曲回退值。
+	AlbumArtistSource string `gorm:"size:32" json:"-"`
+	Album             string `gorm:"size:255" json:"album"`
+	TrackNumber       int    `json:"track_number"`
+	Year              int    `json:"year"`
 
 	// 任务状态
 	Status  string `gorm:"size:32;not null;index" json:"status"` // queued/resolving/downloading/tagging/moving/scanning/done/failed
@@ -61,6 +64,7 @@ type TrackMetadata struct {
 	Title                     string
 	Artist                    string
 	AlbumArtist               string
+	AlbumArtistSource         string
 	Album                     string
 	TrackNumber               int
 	DiscNumber                int
@@ -80,6 +84,35 @@ type TrackMetadata struct {
 }
 
 // JobStatus 任务状态常量
+const (
+	AlbumArtistSourceFingerprint         = "fingerprint"
+	AlbumArtistSourceMusicBrainz         = "musicbrainz"
+	AlbumArtistSourceAlbumShared         = "album_shared"
+	AlbumArtistSourceFallbackFirstArtist = "fallback_first_artist"
+	AlbumArtistSourceFallbackArtist      = "fallback_artist"
+)
+
+func NormalizeAlbumArtistSource(source string) string {
+	return strings.TrimSpace(strings.ToLower(source))
+}
+
+func IsReliableAlbumArtistSource(source string) bool {
+	switch NormalizeAlbumArtistSource(source) {
+	case AlbumArtistSourceFingerprint, AlbumArtistSourceMusicBrainz, AlbumArtistSourceAlbumShared:
+		return true
+	default:
+		return false
+	}
+}
+
+func ReliableAlbumArtistSources() []string {
+	return []string{
+		AlbumArtistSourceFingerprint,
+		AlbumArtistSourceMusicBrainz,
+		AlbumArtistSourceAlbumShared,
+	}
+}
+
 const (
 	JobStatusQueued      = "queued"
 	JobStatusResolving   = "resolving"

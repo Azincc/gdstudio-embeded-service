@@ -288,10 +288,29 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 			return nil
 		}, nil)
 		if err != nil {
-			t.logger.Warn("brainz metadata lookup failed, falling back to gdstudio",
+			t.logger.Warn("brainz fingerprint metadata lookup failed",
 				zap.String("job_id", payload.JobID),
 				zap.Error(err))
-		} else if brainzMeta != nil {
+		}
+		if brainzMeta == nil {
+			err = retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
+				resolved, lookupErr := t.mbClient.LookupTrackMetadata(job.Title, job.Artist, job.Album)
+				if lookupErr != nil {
+					return lookupErr
+				}
+				brainzMeta = resolved
+				return nil
+			}, nil)
+			if err != nil {
+				t.logger.Warn("brainz search metadata lookup failed",
+					zap.String("job_id", payload.JobID),
+					zap.String("title", job.Title),
+					zap.String("artist", job.Artist),
+					zap.String("album", job.Album),
+					zap.Error(err))
+			}
+		}
+		if brainzMeta != nil {
 			applyFingerprintMetadata(job, brainzMeta)
 			coverURL = brainzMeta.CoverURL
 			coverData = brainzMeta.CoverData
@@ -397,23 +416,26 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 
 	albumArtist := job.AlbumArtist
-	if albumArtist == "" {
-		albumArtist = t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
+	albumArtistSource := model.NormalizeAlbumArtistSource(job.AlbumArtistSource)
+	if albumArtist == "" || !model.IsReliableAlbumArtistSource(albumArtistSource) {
+		albumArtist, albumArtistSource = t.determineAlbumArtist(job)
 		job.AlbumArtist = albumArtist
+		job.AlbumArtistSource = albumArtistSource
 	}
 
 	// 构建元数据
 	metadata := &model.TrackMetadata{
-		Title:       job.Title,
-		Artist:      job.Artist,
-		AlbumArtist: albumArtist,
-		Album:       job.Album,
-		TrackNumber: job.TrackNumber,
-		Year:        job.Year,
-		CoverURL:    coverURL,
-		CoverData:   coverData,
-		Lyrics:      lyrics,
-		Translation: translation,
+		Title:             job.Title,
+		Artist:            job.Artist,
+		AlbumArtist:       albumArtist,
+		AlbumArtistSource: albumArtistSource,
+		Album:             job.Album,
+		TrackNumber:       job.TrackNumber,
+		Year:              job.Year,
+		CoverURL:          coverURL,
+		CoverData:         coverData,
+		Lyrics:            lyrics,
+		Translation:       translation,
 	}
 	if brainzMeta != nil {
 		metadata.DiscNumber = brainzMeta.DiscNumber
@@ -424,6 +446,13 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	}
 	if err := t.repo.Update(job); err != nil {
 		t.logger.Warn("failed to persist enriched metadata", zap.Error(err))
+	} else if model.IsReliableAlbumArtistSource(job.AlbumArtistSource) {
+		if err := t.repo.PropagateReliableAlbumArtist(job.Source, job.LibraryID, job.Album, job.AlbumArtist, job.ID); err != nil {
+			t.logger.Warn("failed to share album artist with same album jobs",
+				zap.String("job_id", job.ID),
+				zap.String("album", job.Album),
+				zap.Error(err))
+		}
 	}
 
 	// 写入标签
@@ -469,6 +498,7 @@ func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintM
 	}
 	if metadata.AlbumArtist != "" {
 		job.AlbumArtist = metadata.AlbumArtist
+		job.AlbumArtistSource = model.NormalizeAlbumArtistSource(metadata.AlbumArtistSource)
 	}
 	if metadata.Album != "" {
 		job.Album = metadata.Album
@@ -479,6 +509,54 @@ func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintM
 	if metadata.Year > 0 {
 		job.Year = metadata.Year
 	}
+}
+
+func (t *DownloadTask) determineAlbumArtist(job *model.Job) (string, string) {
+	if job == nil {
+		return "", ""
+	}
+
+	currentArtist := strings.TrimSpace(job.AlbumArtist)
+	currentSource := model.NormalizeAlbumArtistSource(job.AlbumArtistSource)
+	if selectedArtist, selectedSource, ok := chooseAlbumArtist(currentArtist, currentSource, ""); ok {
+		return selectedArtist, selectedSource
+	}
+
+	if t.repo != nil {
+		sharedArtist, sharedSource, err := t.repo.FindReliableAlbumArtist(job.Source, job.LibraryID, job.Album, job.ID)
+		if err != nil {
+			t.logger.Warn("failed to load album artist from same album",
+				zap.String("job_id", job.ID),
+				zap.String("album", job.Album),
+				zap.Error(err))
+		} else if sharedArtist != "" {
+			t.logger.Info("album artist reused from same album",
+				zap.String("job_id", job.ID),
+				zap.String("album", job.Album),
+				zap.String("album_artist", sharedArtist),
+				zap.String("source", sharedSource))
+			if selectedArtist, selectedSource, ok := chooseAlbumArtist(currentArtist, currentSource, sharedArtist); ok {
+				return selectedArtist, selectedSource
+			}
+		}
+	}
+
+	return t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
+}
+
+func chooseAlbumArtist(currentArtist, currentSource, sharedArtist string) (string, string, bool) {
+	currentArtist = strings.TrimSpace(currentArtist)
+	currentSource = model.NormalizeAlbumArtistSource(currentSource)
+	if currentArtist != "" && model.IsReliableAlbumArtistSource(currentSource) {
+		return currentArtist, currentSource, true
+	}
+
+	sharedArtist = strings.TrimSpace(sharedArtist)
+	if sharedArtist != "" {
+		return sharedArtist, model.AlbumArtistSourceAlbumShared, true
+	}
+
+	return "", "", false
 }
 
 func applyGDMetadata(job *model.Job, metadata *gdstudio.MetadataResult) {
@@ -783,7 +861,7 @@ func firstNonEmptyString(values ...string) string {
 }
 
 // resolveAlbumArtist 查询 Album Artist：MusicBrainz → fallback 第一艺术家
-func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) string {
+func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) (string, string) {
 	// 先尝试 MusicBrainz
 	if t.mbClient != nil {
 		albumArtist, err := t.mbClient.LookupAlbumArtist(title, artist, album)
@@ -793,7 +871,7 @@ func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) string {
 			t.logger.Info("album artist resolved via musicbrainz",
 				zap.String("title", title),
 				zap.String("album_artist", albumArtist))
-			return albumArtist
+			return albumArtist, model.AlbumArtistSourceMusicBrainz
 		}
 	}
 
@@ -803,9 +881,9 @@ func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) string {
 		t.logger.Info("album artist fallback to first artist",
 			zap.String("original", artist),
 			zap.String("album_artist", fallback))
-		return fallback
+		return fallback, model.AlbumArtistSourceFallbackFirstArtist
 	}
 
 	// 如果 Artist 本身就是单人的，直接用
-	return artist
+	return artist, model.AlbumArtistSourceFallbackArtist
 }

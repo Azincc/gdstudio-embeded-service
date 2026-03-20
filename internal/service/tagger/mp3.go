@@ -28,13 +28,18 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 
 	// 写入基础标签
 	tag.SetTitle(metadata.Title)
-	tag.SetArtist(metadata.Artist)
 	tag.SetAlbum(metadata.Album)
 
+	artistFrameID := tag.CommonID("Artist")
+	tag.DeleteFrames(artistFrameID)
+	tag.AddTextFrame(artistFrameID, tag.DefaultEncoding(), encodeID3v24MultiValueText(metadata.Artist))
+
 	// 写入 Album Artist (TPE2)
+	albumArtistFrameID := tag.CommonID("Band/Orchestra/Accompaniment")
+	tag.DeleteFrames(albumArtistFrameID)
 	if metadata.AlbumArtist != "" {
-		tag.AddTextFrame(tag.CommonID("Band/Orchestra/Accompaniment"),
-			tag.DefaultEncoding(), metadata.AlbumArtist)
+		tag.AddTextFrame(albumArtistFrameID,
+			tag.DefaultEncoding(), encodeID3v24MultiValueText(metadata.AlbumArtist))
 	}
 
 	if metadata.TrackNumber > 0 {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/config"
+	"github.com/azin/gdstudio-embed-service/internal/model"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +34,7 @@ type FingerprintMetadata struct {
 	Title                     string
 	Artist                    string
 	AlbumArtist               string
+	AlbumArtistSource         string
 	Album                     string
 	TrackNumber               int
 	DiscNumber                int
@@ -58,6 +60,41 @@ func NewClient(cfg *config.MusicBrainzConfig, logger *zap.Logger) *Client {
 
 type recordingSearchResponse struct {
 	Recordings []recordingResult `json:"recordings"`
+}
+
+type releaseSearchResponse struct {
+	Releases []release `json:"releases"`
+}
+
+type releaseDetailResponse struct {
+	ID              string                `json:"id"`
+	Title           string                `json:"title"`
+	Date            string                `json:"date"`
+	ArtistCredit    []artistCredit        `json:"artist-credit"`
+	CoverArtArchive coverArtArchiveStatus `json:"cover-art-archive"`
+	Media           []releaseDetailMedium `json:"media"`
+}
+
+type coverArtArchiveStatus struct {
+	Front bool `json:"front"`
+	Count int  `json:"count"`
+}
+
+type releaseDetailMedium struct {
+	Position int                  `json:"position"`
+	Tracks   []releaseDetailTrack `json:"tracks"`
+}
+
+type releaseDetailTrack struct {
+	Number       string         `json:"number"`
+	Title        string         `json:"title"`
+	ArtistCredit []artistCredit `json:"artist-credit"`
+	Recording    struct {
+		ID               string         `json:"id"`
+		Title            string         `json:"title"`
+		ArtistCredit     []artistCredit `json:"artist-credit"`
+		FirstReleaseDate string         `json:"first-release-date"`
+	} `json:"recording"`
 }
 
 type recordingResult struct {
@@ -195,32 +232,114 @@ func (c *Client) LookupAlbumArtist(title, artist, album string) (string, error) 
 
 	title = strings.TrimSpace(title)
 	artist = strings.TrimSpace(artist)
-	if title == "" {
+	album = strings.TrimSpace(album)
+	if title == "" && album == "" {
 		return "", nil
+	}
+
+	if title != "" {
+		query := fmt.Sprintf("recording:%s", quoteQuery(title))
+		if artist != "" {
+			query += fmt.Sprintf(" AND artist:%s", quoteQuery(extractFirstArtist(artist)))
+		}
+
+		resp, err := c.searchRecordings(query, 5)
+		if err != nil {
+			c.logger.Warn("musicbrainz recording request failed", zap.Error(err))
+		} else {
+			albumArtist := c.extractAlbumArtist(resp.Recordings, title, album)
+			if albumArtist != "" {
+				c.logger.Info("album artist found via musicbrainz recording",
+					zap.String("title", title),
+					zap.String("album_artist", albumArtist))
+				return albumArtist, nil
+			}
+		}
+	}
+
+	if album != "" {
+		albumArtist, err := c.lookupAlbumArtistByRelease(album, artist)
+		if err != nil {
+			c.logger.Warn("musicbrainz release request failed", zap.Error(err))
+		} else if albumArtist != "" {
+			c.logger.Info("album artist found via musicbrainz release",
+				zap.String("album", album),
+				zap.String("album_artist", albumArtist))
+			return albumArtist, nil
+		}
+	}
+
+	c.logger.Debug("no album artist found in musicbrainz",
+		zap.String("title", title),
+		zap.String("album", album))
+	return "", nil
+}
+
+// LookupTrackMetadata 通过 MusicBrainz 搜索补全曲目级元数据。
+func (c *Client) LookupTrackMetadata(title, artist, album string) (*FingerprintMetadata, error) {
+	if c == nil || c.cfg == nil || !c.cfg.Enabled {
+		return nil, nil
+	}
+
+	title = strings.TrimSpace(title)
+	artist = strings.TrimSpace(artist)
+	album = strings.TrimSpace(album)
+	if title == "" && album == "" {
+		return nil, nil
+	}
+
+	if album != "" {
+		metadata, err := c.lookupTrackMetadataByRelease(title, artist, album)
+		if err != nil {
+			return nil, err
+		}
+		if metadata != nil {
+			return metadata, nil
+		}
+	}
+
+	if title == "" {
+		return nil, nil
 	}
 
 	query := fmt.Sprintf("recording:%s", quoteQuery(title))
 	if artist != "" {
 		query += fmt.Sprintf(" AND artist:%s", quoteQuery(extractFirstArtist(artist)))
 	}
-
-	resp, err := c.searchRecordings(query, 5)
+	resp, err := c.searchRecordings(query, 10)
 	if err != nil {
-		c.logger.Warn("musicbrainz request failed", zap.Error(err))
-		return "", nil
+		return nil, err
 	}
 
-	albumArtist := c.extractAlbumArtist(resp.Recordings, title, album)
-	if albumArtist != "" {
-		c.logger.Info("album artist found via musicbrainz",
-			zap.String("title", title),
-			zap.String("album_artist", albumArtist))
-	} else {
-		c.logger.Debug("no album artist found in musicbrainz",
-			zap.String("title", title))
+	rec := pickBestRecording(resp.Recordings, "", title, artist, album, "")
+	if rec == nil {
+		return nil, nil
 	}
 
-	return albumArtist, nil
+	metadata := &FingerprintMetadata{
+		Title:                  strings.TrimSpace(rec.Title),
+		Artist:                 strings.TrimSpace(joinArtistCredits(rec.ArtistCredit)),
+		Album:                  album,
+		AlbumArtistSource:      model.AlbumArtistSourceMusicBrainz,
+		MusicBrainzRecordingID: strings.TrimSpace(rec.ID),
+	}
+	if rel := pickBestRelease(rec.Releases, album, ""); rel != nil {
+		applyReleaseToMetadata(metadata, rel)
+	}
+	if metadata.Date == "" {
+		metadata.Date = rec.FirstReleaseDate
+	}
+	if metadata.Year == 0 {
+		metadata.Year = yearFromDate(metadata.Date)
+	}
+	if metadata.AlbumArtist == "" {
+		if metadata.Artist != "" {
+			metadata.AlbumArtist = metadata.Artist
+		}
+		metadata.AlbumArtistSource = model.AlbumArtistSourceFallbackArtist
+	}
+	c.attachCover(metadata)
+	return metadata, nil
 }
 
 func (c *Client) lookupAcoustID(fp *audioFingerprint) (*acoustIDRecording, error) {
@@ -344,6 +463,81 @@ func (c *Client) searchRecordings(query string, limit int) (*recordingSearchResp
 	return &result, nil
 }
 
+func (c *Client) searchReleases(query string, limit int) (*releaseSearchResponse, error) {
+	c.rateLimit()
+
+	values := url.Values{}
+	values.Set("query", query)
+	values.Set("limit", strconv.Itoa(limit))
+	values.Set("fmt", "json")
+
+	reqURL := fmt.Sprintf("%s/release/?%s", strings.TrimRight(c.cfg.BaseURL, "/"), values.Encode())
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	req.Header.Set("Accept", "application/json")
+
+	c.logger.Debug("searching musicbrainz releases",
+		zap.String("query", query),
+		zap.String("url", reqURL))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("musicbrainz request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
+	}
+
+	var result releaseSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("musicbrainz decode failed: %w", err)
+	}
+
+	return &result, nil
+}
+
+func (c *Client) fetchReleaseDetail(releaseID string) (*releaseDetailResponse, error) {
+	if strings.TrimSpace(releaseID) == "" {
+		return nil, nil
+	}
+
+	c.rateLimit()
+
+	values := url.Values{}
+	values.Set("inc", "recordings+artist-credits")
+	values.Set("fmt", "json")
+
+	reqURL := fmt.Sprintf("%s/release/%s?%s", strings.TrimRight(c.cfg.BaseURL, "/"), releaseID, values.Encode())
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("musicbrainz request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
+	}
+
+	var result releaseDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("musicbrainz decode failed: %w", err)
+	}
+
+	return &result, nil
+}
+
 func (c *Client) metadataFromSearch(match *acoustIDRecording, rec *recordingResult, rel *release) *FingerprintMetadata {
 	albumTitle, rgID := firstReleaseGroup(match.ReleaseGroups)
 	metadata := &FingerprintMetadata{
@@ -384,6 +578,7 @@ func (c *Client) metadataFromSearch(match *acoustIDRecording, rec *recordingResu
 		}
 		if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" {
 			metadata.AlbumArtist = albumArtist
+			metadata.AlbumArtistSource = model.AlbumArtistSourceFingerprint
 		}
 		if rel.ID != "" {
 			metadata.MusicBrainzReleaseID = rel.ID
@@ -399,9 +594,53 @@ func (c *Client) metadataFromSearch(match *acoustIDRecording, rec *recordingResu
 
 	if metadata.AlbumArtist == "" {
 		metadata.AlbumArtist = metadata.Artist
+		metadata.AlbumArtistSource = model.AlbumArtistSourceFallbackArtist
 	}
 
 	return metadata
+}
+
+func (c *Client) lookupTrackMetadataByRelease(title, artist, album string) (*FingerprintMetadata, error) {
+	resp, err := c.searchReleases(fmt.Sprintf("release:%s", quoteQuery(album)), 5)
+	if err != nil {
+		return nil, err
+	}
+
+	bestRelease := pickBestReleaseForAlbumArtist(resp.Releases, album, artist)
+	if bestRelease == nil {
+		return nil, nil
+	}
+
+	metadata := &FingerprintMetadata{
+		AlbumArtistSource: model.AlbumArtistSourceMusicBrainz,
+	}
+	applyReleaseToMetadata(metadata, bestRelease)
+
+	detail, err := c.fetchReleaseDetail(bestRelease.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if track := pickBestReleaseDetailTrack(detail, title, artist); track != nil {
+		applyReleaseDetailTrackToMetadata(metadata, track)
+	} else {
+		metadata.Title = firstNonEmptyString(title, metadata.Title)
+		metadata.Artist = firstNonEmptyString(artist, metadata.Artist)
+	}
+
+	if metadata.Date == "" && detail != nil {
+		metadata.Date = detail.Date
+	}
+	if metadata.Year == 0 {
+		metadata.Year = yearFromDate(metadata.Date)
+	}
+	if metadata.AlbumArtist == "" {
+		metadata.AlbumArtist = metadata.Artist
+		metadata.AlbumArtistSource = model.AlbumArtistSourceFallbackArtist
+	}
+
+	c.attachCover(metadata)
+	return metadata, nil
 }
 
 func (c *Client) lookupCoverArt(releaseID, releaseGroupID string) (string, []byte, error) {
@@ -471,15 +710,15 @@ func (c *Client) extractAlbumArtist(recordings []recordingResult, title, album s
 			if normalizedAlbum != "" && normalize(rel.Title) != normalizedAlbum {
 				continue
 			}
-			if len(rel.ArtistCredit) > 0 {
-				return rel.ArtistCredit[0].Artist.Name
+			if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" {
+				return albumArtist
 			}
 		}
 
 		if normalizedAlbum != "" {
 			for _, rel := range rec.Releases {
-				if len(rel.ArtistCredit) > 0 {
-					return rel.ArtistCredit[0].Artist.Name
+				if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" {
+					return albumArtist
 				}
 			}
 		}
@@ -487,13 +726,98 @@ func (c *Client) extractAlbumArtist(recordings []recordingResult, title, album s
 
 	for _, rec := range recordings {
 		for _, rel := range rec.Releases {
-			if len(rel.ArtistCredit) > 0 {
-				return rel.ArtistCredit[0].Artist.Name
+			if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" {
+				return albumArtist
 			}
 		}
 	}
 
 	return ""
+}
+
+func applyReleaseToMetadata(metadata *FingerprintMetadata, rel *release) {
+	if metadata == nil || rel == nil {
+		return
+	}
+
+	if rel.Title != "" {
+		metadata.Album = rel.Title
+	}
+	if rel.Date != "" {
+		metadata.Date = rel.Date
+		if metadata.Year == 0 {
+			metadata.Year = yearFromDate(rel.Date)
+		}
+	}
+	if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" {
+		metadata.AlbumArtist = albumArtist
+		metadata.AlbumArtistSource = model.AlbumArtistSourceMusicBrainz
+	}
+	if rel.ID != "" {
+		metadata.MusicBrainzReleaseID = rel.ID
+	}
+	if rel.ReleaseGroup.ID != "" {
+		metadata.MusicBrainzReleaseGroupID = rel.ReleaseGroup.ID
+	}
+}
+
+func applyReleaseDetailTrackToMetadata(metadata *FingerprintMetadata, track *releaseDetailTrack) {
+	if metadata == nil || track == nil {
+		return
+	}
+
+	if trackTitle := firstNonEmptyString(track.Recording.Title, track.Title); trackTitle != "" {
+		metadata.Title = trackTitle
+	}
+	if trackArtist := firstNonEmptyString(joinArtistCredits(track.Recording.ArtistCredit), joinArtistCredits(track.ArtistCredit)); trackArtist != "" {
+		metadata.Artist = trackArtist
+	}
+	if track.Recording.ID != "" {
+		metadata.MusicBrainzRecordingID = track.Recording.ID
+	}
+	if metadata.TrackNumber == 0 {
+		metadata.TrackNumber = toPositiveInt(track.Number)
+	}
+	if metadata.Date == "" {
+		metadata.Date = track.Recording.FirstReleaseDate
+	}
+	if metadata.Year == 0 {
+		metadata.Year = yearFromDate(metadata.Date)
+	}
+}
+
+func (c *Client) attachCover(metadata *FingerprintMetadata) {
+	if metadata == nil {
+		return
+	}
+	if metadata.MusicBrainzReleaseID == "" && metadata.MusicBrainzReleaseGroupID == "" {
+		return
+	}
+
+	coverURL, coverData, coverErr := c.lookupCoverArt(metadata.MusicBrainzReleaseID, metadata.MusicBrainzReleaseGroupID)
+	if coverErr != nil {
+		c.logger.Warn("brainz cover lookup failed",
+			zap.String("release_id", metadata.MusicBrainzReleaseID),
+			zap.String("release_group_id", metadata.MusicBrainzReleaseGroupID),
+			zap.Error(coverErr))
+		return
+	}
+	metadata.CoverURL = coverURL
+	metadata.CoverData = coverData
+}
+
+func (c *Client) lookupAlbumArtistByRelease(album, artist string) (string, error) {
+	query := fmt.Sprintf("release:%s", quoteQuery(album))
+	resp, err := c.searchReleases(query, 5)
+	if err != nil {
+		return "", err
+	}
+
+	best := pickBestReleaseForAlbumArtist(resp.Releases, album, artist)
+	if best == nil {
+		return "", nil
+	}
+	return joinArtistCredits(best.ArtistCredit), nil
 }
 
 func pickBestRecording(recordings []recordingResult, recordingID, title, artist, albumHint, releaseGroupID string) *recordingResult {
@@ -563,6 +887,190 @@ func pickBestRelease(releases []release, albumHint, releaseGroupID string) *rele
 		return nil
 	}
 	return &releases[bestIdx]
+}
+
+func pickBestReleaseForAlbumArtist(releases []release, albumHint, artistHint string) *release {
+	bestIdx := -1
+	bestScore := -1
+	normalizedAlbum := normalize(albumHint)
+
+	for idx, rel := range releases {
+		score := 0
+		if normalizedAlbum != "" && normalize(rel.Title) == normalizedAlbum {
+			score += 80
+		}
+		if strings.EqualFold(strings.TrimSpace(rel.Status), "official") {
+			score += 10
+		}
+		if albumArtist := joinArtistCredits(rel.ArtistCredit); albumArtist != "" && artistMatches(albumArtist, artistHint) {
+			score += 5
+		}
+		if yearFromDate(rel.Date) > 0 {
+			score += 1
+		}
+		if score > bestScore {
+			bestScore = score
+			bestIdx = idx
+		}
+	}
+
+	if bestIdx < 0 {
+		return nil
+	}
+	return &releases[bestIdx]
+}
+
+func pickBestReleaseDetailTrack(detail *releaseDetailResponse, titleHint, artistHint string) *releaseDetailTrack {
+	if detail == nil {
+		return nil
+	}
+
+	var best *releaseDetailTrack
+	bestScore := -1
+	for _, media := range detail.Media {
+		for idx := range media.Tracks {
+			track := &media.Tracks[idx]
+			score := scoreReleaseDetailTrack(track, titleHint, artistHint)
+			if score > bestScore {
+				bestScore = score
+				best = track
+			}
+		}
+	}
+
+	if bestScore <= 0 {
+		return nil
+	}
+	return best
+}
+
+func scoreReleaseDetailTrack(track *releaseDetailTrack, titleHint, artistHint string) int {
+	if track == nil {
+		return 0
+	}
+
+	score := 0
+	for _, candidate := range []string{track.Title, track.Recording.Title} {
+		if normalizedTitleEquals(candidate, titleHint) {
+			score += 100
+		}
+		if normalizedComparableTitle(candidate) == normalizedComparableTitle(titleHint) && normalizedComparableTitle(titleHint) != "" {
+			score += 70
+		}
+		score += sharedTitleTokenScore(candidate, titleHint)
+	}
+
+	trackArtist := firstNonEmptyString(joinArtistCredits(track.Recording.ArtistCredit), joinArtistCredits(track.ArtistCredit))
+	if artistMatches(trackArtist, artistHint) {
+		score += 10
+	}
+	return score
+}
+
+func normalizedTitleEquals(left, right string) bool {
+	return normalize(left) != "" && normalize(left) == normalize(right)
+}
+
+func normalizedComparableTitle(value string) string {
+	replacer := strings.NewReplacer(
+		" ", "",
+		"\t", "",
+		"～", "",
+		"〜", "",
+		"~", "",
+		":", "",
+		"：", "",
+		"-", "",
+		"－", "",
+		"—", "",
+		"‐", "",
+		"・", "",
+		"(", "",
+		")", "",
+		"（", "",
+		"）", "",
+		"[", "",
+		"]", "",
+		"【", "",
+		"】", "",
+	)
+	return replacer.Replace(normalize(value))
+}
+
+func sharedTitleTokenScore(left, right string) int {
+	leftTokens := titleTokens(left)
+	rightTokens := titleTokens(right)
+	if len(leftTokens) == 0 || len(rightTokens) == 0 {
+		return 0
+	}
+
+	rightSet := make(map[string]struct{}, len(rightTokens))
+	for _, token := range rightTokens {
+		rightSet[token] = struct{}{}
+	}
+
+	score := 0
+	for _, token := range leftTokens {
+		if _, ok := rightSet[token]; ok {
+			score += 15
+		}
+	}
+	return score
+}
+
+func titleTokens(value string) []string {
+	value = normalize(value)
+	if value == "" {
+		return nil
+	}
+
+	replacer := strings.NewReplacer(
+		"～", " ",
+		"〜", " ",
+		"~", " ",
+		":", " ",
+		"：", " ",
+		"-", " ",
+		"－", " ",
+		"—", " ",
+		"‐", " ",
+		"/", " ",
+		"／", " ",
+		"(", " ",
+		")", " ",
+		"（", " ",
+		"）", " ",
+		"[", " ",
+		"]", " ",
+		"【", " ",
+		"】", " ",
+		"・", " ",
+	)
+	parts := strings.Fields(replacer.Replace(value))
+	seen := make(map[string]struct{}, len(parts))
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		result = append(result, part)
+	}
+	return result
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func pickTrackPosition(media []medium, title string) (int, int) {
