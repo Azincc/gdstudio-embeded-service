@@ -67,19 +67,20 @@ func (r *JobRepository) FindReliableAlbumArtist(source, libraryID, album, exclud
 		query = query.Where("id <> ?", excludeID)
 	}
 
-	err := query.
+	result := query.
 		Order("CASE album_artist_source " +
 			"WHEN 'fingerprint' THEN 0 " +
 			"WHEN 'musicbrainz' THEN 1 " +
 			"WHEN 'album_shared' THEN 2 " +
 			"ELSE 9 END").
 		Order("updated_at DESC").
-		First(&job).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return "", "", nil
-		}
-		return "", "", err
+		Limit(1).
+		Find(&job)
+	if result.Error != nil {
+		return "", "", result.Error
+	}
+	if result.RowsAffected == 0 {
+		return "", "", nil
 	}
 
 	return strings.TrimSpace(job.AlbumArtist), model.NormalizeAlbumArtistSource(job.AlbumArtistSource), nil

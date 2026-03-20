@@ -71,7 +71,7 @@ metrics:
   path: /metrics
 
 musicbrainz:
-  enabled: false
+  enabled: true
   base_url: https://musicbrainz.org/ws/2
   cover_art_url: https://coverartarchive.org
   acoustid_url: https://api.acoustid.org/v2

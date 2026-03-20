@@ -21,6 +21,11 @@ services:
       - JOB_POLL_INTERVAL=${JOB_POLL_INTERVAL:-2s}
       - DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-600s}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MUSICBRAINZ_ENABLED=${MUSICBRAINZ_ENABLED:-true}
+      - MUSICBRAINZ_BASE_URL=${MUSICBRAINZ_BASE_URL:-https://musicbrainz.org/ws/2}
+      - COVERARTARCHIVE_BASE_URL=${COVERARTARCHIVE_BASE_URL:-https://coverartarchive.org}
+      - ACOUSTID_BASE_URL=${ACOUSTID_BASE_URL:-https://api.acoustid.org/v2}
+      - ACOUSTID_CLIENT=${ACOUSTID_CLIENT:-}
       - TZ=Asia/Shanghai
     volumes:
       - ${NAVIDROME_MUSIC_DIR}:/music:rw
