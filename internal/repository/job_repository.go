@@ -220,27 +220,29 @@ func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
 
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var job model.Job
-		if err := tx.Where("status = ?", model.JobStatusQueued).
+		result := tx.Where("status = ?", model.JobStatusQueued).
 			Order("created_at ASC").
-			First(&job).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return nil
-			}
-			return err
+			Limit(1).
+			Find(&job)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
 		}
 
 		now := time.Now()
-		result := tx.Model(&model.Job{}).
+		updateResult := tx.Model(&model.Job{}).
 			Where("id = ? AND status = ?", job.ID, model.JobStatusQueued).
 			Updates(map[string]interface{}{
 				"status":     model.JobStatusResolving,
 				"message":    "",
 				"updated_at": now,
 			})
-		if result.Error != nil {
-			return result.Error
+		if updateResult.Error != nil {
+			return updateResult.Error
 		}
-		if result.RowsAffected == 0 {
+		if updateResult.RowsAffected == 0 {
 			return errJobAlreadyClaimed
 		}
 
