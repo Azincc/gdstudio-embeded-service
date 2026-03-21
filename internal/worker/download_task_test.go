@@ -55,3 +55,51 @@ func TestApplyFingerprintMetadataPreservesAlbumArtistSource(t *testing.T) {
 		t.Fatalf("expected fingerprint source, got %q", job.AlbumArtistSource)
 	}
 }
+
+func TestApplyFingerprintMetadataPreservesExistingTrackTitleAndArtist(t *testing.T) {
+	job := &model.Job{
+		Title:  "决行 〜姫をさがして：黄金〜",
+		Artist: "植松伸夫 / 矢崎早彩",
+	}
+	metadata := &musicbrainz.FingerprintMetadata{
+		Title:             "決行～姫をさがして:黄金～",
+		Artist:            "祖堅正慶",
+		AlbumArtist:       "祖堅正慶",
+		AlbumArtistSource: model.AlbumArtistSourceMusicBrainz,
+		TrackNumber:       5,
+		Year:              2025,
+	}
+
+	applyFingerprintMetadata(job, metadata)
+	if job.Title != "决行 〜姫をさがして：黄金〜" {
+		t.Fatalf("expected source title to be preserved, got %q", job.Title)
+	}
+	if job.Artist != "植松伸夫 / 矢崎早彩" {
+		t.Fatalf("expected source artist to be preserved, got %q", job.Artist)
+	}
+	if job.AlbumArtist != "祖堅正慶" {
+		t.Fatalf("expected album artist to be updated, got %q", job.AlbumArtist)
+	}
+	if job.AlbumArtistSource != model.AlbumArtistSourceMusicBrainz {
+		t.Fatalf("expected musicbrainz album artist source, got %q", job.AlbumArtistSource)
+	}
+	if job.TrackNumber != 5 || job.Year != 2025 {
+		t.Fatalf("expected track number/year to be updated, got track=%d year=%d", job.TrackNumber, job.Year)
+	}
+}
+
+func TestApplyFingerprintMetadataBackfillsMissingTrackTitleAndArtist(t *testing.T) {
+	job := &model.Job{}
+	metadata := &musicbrainz.FingerprintMetadata{
+		Title:  "決行～姫をさがして:黄金～",
+		Artist: "祖堅正慶",
+	}
+
+	applyFingerprintMetadata(job, metadata)
+	if job.Title != "決行～姫をさがして:黄金～" {
+		t.Fatalf("expected missing title to be backfilled, got %q", job.Title)
+	}
+	if job.Artist != "祖堅正慶" {
+		t.Fatalf("expected missing artist to be backfilled, got %q", job.Artist)
+	}
+}

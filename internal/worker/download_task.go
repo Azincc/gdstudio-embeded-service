@@ -490,10 +490,11 @@ func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintM
 	if metadata == nil {
 		return
 	}
-	if metadata.Title != "" {
+	// 保留源站已有的曲目标题/歌手，MusicBrainz 只在缺失时补齐。
+	if job.Title == "" && metadata.Title != "" {
 		job.Title = metadata.Title
 	}
-	if metadata.Artist != "" {
+	if job.Artist == "" && metadata.Artist != "" {
 		job.Artist = metadata.Artist
 	}
 	if metadata.AlbumArtist != "" {
