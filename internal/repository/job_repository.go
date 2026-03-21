@@ -187,6 +187,27 @@ func (r *JobRepository) ListByStatus(status string, limit int) ([]*model.Job, er
 	return jobs, err
 }
 
+// FindNextByStatuses 查询最早创建的一条指定状态任务。
+func (r *JobRepository) FindNextByStatuses(statuses []string) (*model.Job, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+
+	var job model.Job
+	result := r.db.Where("status IN ?", statuses).
+		Order("created_at ASC").
+		Limit(1).
+		Find(&job)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+
+	return &job, nil
+}
+
 // ListRecent 查询最近的任务
 func (r *JobRepository) ListRecent(limit int) ([]*model.Job, error) {
 	var jobs []*model.Job

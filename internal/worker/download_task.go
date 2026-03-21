@@ -72,25 +72,36 @@ func NewDownloadTask(
 
 // ProcessPayload 处理任务。
 func (t *DownloadTask) ProcessPayload(ctx context.Context, payload *DownloadPayload) error {
+	if err := t.ProcessDownloadPayload(ctx, payload); err != nil {
+		return err
+	}
+	return t.ProcessPostProcessPayload(ctx, payload)
+}
+
+// DownloadTimeout 返回下载阶段的超时时间。
+func (t *DownloadTask) DownloadTimeout() time.Duration {
+	if t == nil || t.cfg == nil {
+		return 0
+	}
+	return t.cfg.Worker.DownloadTimeout
+}
+
+// ProcessDownloadPayload 处理解析和下载阶段，完成后把任务推进到 tagging。
+func (t *DownloadTask) ProcessDownloadPayload(ctx context.Context, payload *DownloadPayload) error {
 	t.logger.Info("processing download task",
 		zap.String("job_id", payload.JobID),
 		zap.String("source", payload.Source),
 		zap.String("track_id", payload.TrackID))
 
-	// 执行状态机流程
 	stages := []struct {
 		name string
 		fn   func(context.Context, *DownloadPayload) error
 	}{
 		{model.JobStatusResolving, t.stageResolve},
 		{model.JobStatusDownloading, t.stageDownload},
-		{model.JobStatusTagging, t.stageTagging},
-		{model.JobStatusMoving, t.stageMoving},
-		{model.JobStatusScanning, t.stageScanning},
 	}
 
 	for _, stage := range stages {
-		// 更新状态。不要覆盖 message，message 字段在当前实现中用于阶段间传递下载 URL。
 		if err := t.repo.UpdateStatus(payload.JobID, stage.name, ""); err != nil {
 			t.logger.Error("failed to update status", zap.Error(err))
 		}
@@ -110,8 +121,55 @@ func (t *DownloadTask) ProcessPayload(ctx context.Context, payload *DownloadPayl
 		}
 	}
 
-	// 标记完成
+	if err := t.repo.UpdateStatus(payload.JobID, model.JobStatusTagging, ""); err != nil {
+		if markErr := t.repo.MarkFailed(payload.JobID, err); markErr != nil {
+			t.logger.Error("failed to mark job as failed", zap.Error(markErr))
+		}
+		return fmt.Errorf("failed to queue post-processing: %w", err)
+	}
+
+	t.logger.Info("download stages completed",
+		zap.String("job_id", payload.JobID),
+		zap.String("next_status", model.JobStatusTagging))
+
+	return nil
+}
+
+// ProcessPostProcessPayload 处理打标签、移动和扫描阶段。
+func (t *DownloadTask) ProcessPostProcessPayload(ctx context.Context, payload *DownloadPayload) error {
+	t.logger.Info("processing post-download stages", zap.String("job_id", payload.JobID))
+
 	job, err := t.repo.FindByID(payload.JobID)
+	if err != nil {
+		return fmt.Errorf("failed to find job: %w", err)
+	}
+
+	stages := t.postProcessStages(job.Status)
+	if len(stages) == 0 {
+		return nil
+	}
+
+	for _, stage := range stages {
+		if err := t.repo.UpdateStatus(payload.JobID, stage.name, ""); err != nil {
+			t.logger.Error("failed to update status", zap.Error(err))
+		}
+
+		if err := stage.fn(ctx, payload); err != nil {
+			t.logger.Error("stage failed",
+				zap.String("stage", stage.name),
+				zap.String("job_id", payload.JobID),
+				zap.Error(err))
+
+			if markErr := t.repo.MarkFailed(payload.JobID, err); markErr != nil {
+				t.logger.Error("failed to mark job as failed", zap.Error(markErr))
+			}
+
+			return fmt.Errorf("%s failed: %w", stage.name, err)
+		}
+	}
+
+	// 标记完成
+	job, err = t.repo.FindByID(payload.JobID)
 	if err != nil {
 		return fmt.Errorf("failed to find job: %w", err)
 	}
@@ -122,6 +180,34 @@ func (t *DownloadTask) ProcessPayload(ctx context.Context, payload *DownloadPayl
 
 	t.logger.Info("download task completed", zap.String("job_id", payload.JobID))
 	return nil
+}
+
+func (t *DownloadTask) postProcessStages(status string) []struct {
+	name string
+	fn   func(context.Context, *DownloadPayload) error
+} {
+	all := []struct {
+		name string
+		fn   func(context.Context, *DownloadPayload) error
+	}{
+		{model.JobStatusTagging, t.stageTagging},
+		{model.JobStatusMoving, t.stageMoving},
+		{model.JobStatusScanning, t.stageScanning},
+	}
+
+	start := 0
+	switch status {
+	case model.JobStatusTagging:
+		start = 0
+	case model.JobStatusMoving:
+		start = 1
+	case model.JobStatusScanning:
+		start = 2
+	default:
+		return nil
+	}
+
+	return all[start:]
 }
 
 // PayloadFromJob 从数据库任务构造处理载荷。
