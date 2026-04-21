@@ -5,12 +5,14 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/database"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
+	"github.com/azin/gdstudio-embed-service/internal/service/metadata"
 	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
@@ -20,7 +22,7 @@ import (
 )
 
 var (
-	Version   = "0.1.1"
+	Version   = "0.2.5"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -59,6 +61,7 @@ func main() {
 	}
 
 	jobRepo := repository.NewJobRepository(db)
+	metadataJobRepo := repository.NewMetadataJobRepository(db)
 	gdClient := gdstudio.NewClient(&cfg.GDStudio, log)
 	naviClient := navidrome.NewClient(&cfg.Navidrome, log)
 	taggerService := tagger.NewTagger(log)
@@ -98,14 +101,34 @@ func main() {
 		cfg.Worker.MaxConcurrent,
 		cfg.Worker.PollInterval,
 	)
+	metadataResolver := metadata.NewResolver(cfg, gdClient, mbClient, log)
+	metadataTask := worker.NewMetadataApplyTask(
+		cfg,
+		metadataJobRepo,
+		metadataResolver,
+		taggerService,
+		naviClient,
+		log,
+	)
+	metadataRunner := worker.NewMetadataRunner(
+		metadataJobRepo,
+		metadataTask,
+		log,
+		cfg.Worker.PollInterval,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		runner.Run(ctx)
-		close(done)
+	}()
+	go func() {
+		defer wg.Done()
+		metadataRunner.Run(ctx)
 	}()
 
 	log.Info("worker started", zap.Int("concurrency", cfg.Worker.MaxConcurrent))
@@ -116,5 +139,5 @@ func main() {
 
 	log.Info("shutting down worker...")
 	cancel()
-	<-done
+	wg.Wait()
 }

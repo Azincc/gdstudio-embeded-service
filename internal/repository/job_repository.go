@@ -302,13 +302,16 @@ func (r *JobRepository) DeleteOldJobs(days int) error {
 // InitDB 初始化数据库
 func InitDB(db *gorm.DB) error {
 	// 自动迁移表结构
-	if err := db.AutoMigrate(&model.Job{}); err != nil {
+	if err := db.AutoMigrate(&model.Job{}, &model.MetadataJob{}); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
 	// 创建索引
 	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at DESC)").Error; err != nil {
 		return fmt.Errorf("failed to create index: %w", err)
+	}
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_metadata_jobs_status_created ON metadata_jobs(status, created_at DESC)").Error; err != nil {
+		return fmt.Errorf("failed to create metadata job index: %w", err)
 	}
 
 	return nil

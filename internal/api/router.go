@@ -8,7 +8,11 @@ import (
 )
 
 // SetupRouter 设置路由
-func SetupRouter(cfg *config.Config, jobHandler *handlers.JobHandler) *gin.Engine {
+func SetupRouter(
+	cfg *config.Config,
+	jobHandler *handlers.JobHandler,
+	metadataHandler *handlers.MetadataHandler,
+) *gin.Engine {
 	// 设置 Gin 模式
 	gin.SetMode(cfg.Server.Mode)
 
@@ -34,6 +38,11 @@ func SetupRouter(cfg *config.Config, jobHandler *handlers.JobHandler) *gin.Engin
 		v1.POST("/jobs/:id/cancel", jobHandler.Cancel)
 		v1.DELETE("/jobs/:id", jobHandler.Delete)
 		v1.POST("/jobs/batch-delete", jobHandler.BatchDelete)
+		if metadataHandler != nil {
+			v1.POST("/metadata/candidates", metadataHandler.Candidates)
+			v1.POST("/metadata/apply", metadataHandler.Apply)
+			v1.GET("/metadata/jobs/:id", metadataHandler.GetJob)
+		}
 	}
 
 	return r

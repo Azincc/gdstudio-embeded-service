@@ -12,12 +12,15 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/database"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
+	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
+	"github.com/azin/gdstudio-embed-service/internal/service/metadata"
+	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/pkg/logger"
 	"go.uber.org/zap"
 )
 
 var (
-	Version   = "0.1.1"
+	Version   = "0.2.5"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -61,12 +64,21 @@ func main() {
 
 	// 初始化仓库
 	jobRepo := repository.NewJobRepository(db)
+	metadataJobRepo := repository.NewMetadataJobRepository(db)
+
+	gdClient := gdstudio.NewClient(&cfg.GDStudio, log)
+	var mbClient *musicbrainz.Client
+	if cfg.MusicBrainz.Enabled {
+		mbClient = musicbrainz.NewClient(&cfg.MusicBrainz, log)
+	}
+	metadataResolver := metadata.NewResolver(cfg, gdClient, mbClient, log)
 
 	// 初始化 Handler
 	jobHandler := handlers.NewJobHandler(cfg, jobRepo, log, Version)
+	metadataHandler := handlers.NewMetadataHandler(metadataResolver, metadataJobRepo, log)
 
 	// 设置路由
-	router := api.SetupRouter(cfg, jobHandler)
+	router := api.SetupRouter(cfg, jobHandler, metadataHandler)
 
 	// 启动服务器
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

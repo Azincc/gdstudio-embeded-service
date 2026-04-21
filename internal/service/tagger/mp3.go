@@ -74,6 +74,7 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 			tag.DefaultEncoding(), metadata.Label)
 	}
 	if metadata.Comment != "" {
+		tag.DeleteFrames(tag.CommonID("Comments"))
 		tag.AddCommentFrame(id3v2.CommentFrame{
 			Encoding:    id3v2.EncodingUTF8,
 			Language:    "eng",
@@ -99,6 +100,7 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 
 	// 写入封面
 	if len(metadata.CoverData) > 0 {
+		tag.DeleteFrames(tag.CommonID("Attached picture"))
 		pic := id3v2.PictureFrame{
 			Encoding:    id3v2.EncodingUTF8,
 			MimeType:    "image/jpeg",
@@ -112,6 +114,7 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 
 	// 写入歌词
 	if metadata.Lyrics != "" {
+		tag.DeleteFrames(tag.CommonID("Unsynchronised lyrics/text transcription"))
 		lyricFrame := id3v2.UnsynchronisedLyricsFrame{
 			Encoding:          id3v2.EncodingUTF8,
 			Language:          "eng",
