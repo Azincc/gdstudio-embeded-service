@@ -13,6 +13,7 @@ services:
       - DATABASE_URL=file:/work/data/embed.db?_journal_mode=WAL&_busy_timeout=5000
       - GD_API_BASE=https://music-api.gdstudio.xyz
       - NAVIDROME_BASE_URL=${NAVIDROME_BASE_URL}
+      - NAVIDROME_MUSIC_DIR=${NAVIDROME_MUSIC_DIR}
       - NAVIDROME_USER=${NAVIDROME_USER}
       - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD}
       - API_KEY=${API_KEY:-dev-api-key-please-change-in-production}
@@ -28,6 +29,6 @@ services:
       - ACOUSTID_CLIENT=${ACOUSTID_CLIENT:-}
       - TZ=Asia/Shanghai
     volumes:
-      - ${NAVIDROME_MUSIC_DIR}:/music:rw
+      - ${NAVIDROME_MUSIC_DIR}:${NAVIDROME_MUSIC_DIR}:rw
       - ${WORK_ROOT}/work:/work:rw
     restart: unless-stopped

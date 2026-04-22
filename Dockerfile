@@ -77,8 +77,8 @@ RUN chmod +x /app/start.sh && \
     chown appuser:appuser /app/start.sh
 
 # 创建工作目录
-RUN mkdir -p /work/tmp /music/library && \
-    chown -R appuser:appuser /work /music /app
+RUN mkdir -p /work/tmp && \
+    chown -R appuser:appuser /work /app
 
 USER appuser
 

@@ -133,6 +133,7 @@ func Load(configPath string) (*Config, error) {
 	v.BindEnv("navidrome.base_url", "NAVIDROME_BASE_URL")
 	v.BindEnv("navidrome.username", "NAVIDROME_USER")
 	v.BindEnv("navidrome.password", "NAVIDROME_PASSWORD")
+	v.BindEnv("storage.music_dir", "NAVIDROME_MUSIC_DIR")
 	v.BindEnv("database.dsn", "DATABASE_URL")
 	v.BindEnv("worker.max_concurrent", "MAX_CONCURRENT_JOBS")
 	v.BindEnv("worker.poll_interval", "JOB_POLL_INTERVAL")

@@ -28,7 +28,7 @@ curl http://localhost:8080/healthz
 
 默认 `docker-compose.yml` 会挂载：
 
-- `${NAVIDROME_MUSIC_DIR:-/tmp/music}` -> `/music`
+- `${NAVIDROME_MUSIC_DIR:-/tmp/music}` -> `${NAVIDROME_MUSIC_DIR:-/tmp/music}`
 - `${WORK_DIR:-/tmp/embed-work}` -> `/work`
 
 SQLite 数据库默认写入：
@@ -63,7 +63,7 @@ curl http://localhost:5434/healthz
 
 生产环境默认挂载：
 
-- `${NAVIDROME_MUSIC_DIR}` -> `/music`
+- `${NAVIDROME_MUSIC_DIR}` -> `${NAVIDROME_MUSIC_DIR}`
 - `${WORK_ROOT}/work` -> `/work`
 
 SQLite 数据文件位于：
@@ -80,13 +80,14 @@ docker run -d \
   -p 8080:8080 \
   -e DATABASE_URL='file:/work/data/embed.db?_journal_mode=WAL&_busy_timeout=5000' \
   -e NAVIDROME_BASE_URL=http://navidrome:4533 \
+  -e NAVIDROME_MUSIC_DIR=/path/to/music \
   -e NAVIDROME_USER=admin \
   -e NAVIDROME_PASSWORD=password \
   -e API_KEY=change-me \
   -e MAX_CONCURRENT_JOBS=3 \
   -e JOB_POLL_INTERVAL=2s \
   -e DOWNLOAD_TIMEOUT=600s \
-  -v /path/to/music:/music:rw \
+  -v /path/to/music:/path/to/music:rw \
   -v /path/to/work:/work:rw \
   ghcr.io/azincc/gdstudio-embeded-service:latest
 ```
@@ -148,14 +149,14 @@ docker-compose logs --tail=200 embed-service
 
 - Worker 进程是否正常启动
 - `/work/data/embed.db` 是否可写
-- `/music` 和 `/work` 挂载路径是否存在
+- `${NAVIDROME_MUSIC_DIR}` 和 `/work` 挂载路径是否存在
 - Navidrome 地址和账号是否可访问
 
 ## 安全建议
 
 - 修改默认 `API_KEY`
 - 不要把 `.env` 提交到仓库
-- 给 `/work` 和 `/music` 设置明确权限
+- 给 `/work` 和 `${NAVIDROME_MUSIC_DIR}` 设置明确权限
 - 生产环境建议通过反向代理提供 HTTPS
 
 ---

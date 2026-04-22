@@ -20,7 +20,7 @@ navidrome:
 
 storage:
   work_dir: /work/tmp
-  music_dir: /music/library
+  music_dir: /music/library  # Docker 部署时由 NAVIDROME_MUSIC_DIR 环境变量覆盖
   path_template: "{artist}/{album}/{trackNo:02d} - {title}.{ext}"
   allowed_extensions:
     - mp3

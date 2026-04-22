@@ -85,7 +85,7 @@ go mod init github.com/azin/gdstudio-embed-service
 go mod tidy
 
 # 3. 准备目录
-mkdir -p /work/tmp /work/data /music/library
+mkdir -p /work/tmp /work/data /path/to/navidrome/music
 
 # 4. 运行 API 服务
 go run cmd/api/main.go
@@ -185,7 +185,7 @@ navidrome:
 
 storage:
   work_dir: /work/tmp
-  music_dir: /music/library
+  music_dir: /music/library  # Docker 中会被 NAVIDROME_MUSIC_DIR 覆盖
   path_template: "{artist}/{album}/{trackNo:02d} - {title}.{ext}"
 
 worker:
@@ -204,6 +204,7 @@ GD_API_BASE=https://music-api.gdstudio.xyz
 
 # Navidrome
 NAVIDROME_BASE_URL=http://navidrome:4533
+NAVIDROME_MUSIC_DIR=/path/to/navidrome/music
 NAVIDROME_USER=admin
 NAVIDROME_TOKEN=your-token
 
