@@ -2,9 +2,11 @@ package musicbrainz
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -49,10 +51,12 @@ type FingerprintMetadata struct {
 
 // NewClient 创建 MusicBrainz 客户端
 func NewClient(cfg *config.MusicBrainzConfig, logger *zap.Logger) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
 	return &Client{
 		cfg: cfg,
 		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
+			Timeout:   cfg.Timeout,
+			Transport: transport,
 		},
 		logger: logger,
 	}
@@ -426,76 +430,38 @@ func (c *Client) searchRecordingMetadata(match *acoustIDRecording) (*recordingRe
 }
 
 func (c *Client) searchRecordings(query string, limit int) (*recordingSearchResponse, error) {
-	c.rateLimit()
-
 	values := url.Values{}
 	values.Set("query", query)
 	values.Set("limit", strconv.Itoa(limit))
 	values.Set("fmt", "json")
 
 	reqURL := fmt.Sprintf("%s/recording/?%s", strings.TrimRight(c.cfg.BaseURL, "/"), values.Encode())
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
-	}
-	req.Header.Set("User-Agent", c.cfg.UserAgent)
-	req.Header.Set("Accept", "application/json")
-
 	c.logger.Debug("searching musicbrainz",
 		zap.String("query", query),
 		zap.String("url", reqURL))
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("musicbrainz request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
-	}
-
 	var result recordingSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("musicbrainz decode failed: %w", err)
+	if err := c.doMusicBrainzJSONGet(reqURL, &result); err != nil {
+		return nil, err
 	}
 
 	return &result, nil
 }
 
 func (c *Client) searchReleases(query string, limit int) (*releaseSearchResponse, error) {
-	c.rateLimit()
-
 	values := url.Values{}
 	values.Set("query", query)
 	values.Set("limit", strconv.Itoa(limit))
 	values.Set("fmt", "json")
 
 	reqURL := fmt.Sprintf("%s/release/?%s", strings.TrimRight(c.cfg.BaseURL, "/"), values.Encode())
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
-	}
-	req.Header.Set("User-Agent", c.cfg.UserAgent)
-	req.Header.Set("Accept", "application/json")
-
 	c.logger.Debug("searching musicbrainz releases",
 		zap.String("query", query),
 		zap.String("url", reqURL))
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("musicbrainz request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
-	}
-
 	var result releaseSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("musicbrainz decode failed: %w", err)
+	if err := c.doMusicBrainzJSONGet(reqURL, &result); err != nil {
+		return nil, err
 	}
 
 	return &result, nil
@@ -506,33 +472,14 @@ func (c *Client) fetchReleaseDetail(releaseID string) (*releaseDetailResponse, e
 		return nil, nil
 	}
 
-	c.rateLimit()
-
 	values := url.Values{}
 	values.Set("inc", "recordings+artist-credits")
 	values.Set("fmt", "json")
 
 	reqURL := fmt.Sprintf("%s/release/%s?%s", strings.TrimRight(c.cfg.BaseURL, "/"), releaseID, values.Encode())
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
-	}
-	req.Header.Set("User-Agent", c.cfg.UserAgent)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("musicbrainz request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
-	}
-
 	var result releaseDetailResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("musicbrainz decode failed: %w", err)
+	if err := c.doMusicBrainzJSONGet(reqURL, &result); err != nil {
+		return nil, err
 	}
 
 	return &result, nil
@@ -658,35 +605,11 @@ func (c *Client) lookupCoverArt(releaseID, releaseGroupID string) (string, []byt
 
 	var lastErr error
 	for _, candidate := range candidates {
-		req, err := http.NewRequest("GET", candidate, nil)
-		if err != nil {
-			lastErr = fmt.Errorf("create cover request failed: %w", err)
-			continue
-		}
-		req.Header.Set("User-Agent", c.cfg.UserAgent)
-		req.Header.Set("Accept", "image/*,*/*;q=0.8")
-
-		resp, err := c.httpClient.Do(req)
+		body, err := c.doMusicBrainzBytesGet(candidate, "image/*,*/*;q=0.8")
 		if err != nil {
 			lastErr = fmt.Errorf("cover request failed: %w", err)
 			continue
 		}
-
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = fmt.Errorf("read cover response failed: %w", readErr)
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("cover unexpected status: %d", resp.StatusCode)
-			continue
-		}
-		if len(body) == 0 {
-			lastErr = fmt.Errorf("cover response is empty")
-			continue
-		}
-
 		return candidate, body, nil
 	}
 
@@ -694,6 +617,210 @@ func (c *Client) lookupCoverArt(releaseID, releaseGroupID string) (string, []byt
 		lastErr = fmt.Errorf("cover art not found")
 	}
 	return "", nil, lastErr
+}
+
+func (c *Client) doMusicBrainzJSONGet(reqURL string, target interface{}) error {
+	if target == nil {
+		return fmt.Errorf("musicbrainz decode target is nil")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= c.retryCount(); attempt++ {
+		c.rateLimit()
+
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		if err != nil {
+			return fmt.Errorf("create request failed: %w", err)
+		}
+		req.Header.Set("User-Agent", c.cfg.UserAgent)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("musicbrainz request failed: %w", err)
+			if !c.shouldRetryRequest(err) || attempt == c.retryCount() {
+				break
+			}
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, 0)
+			time.Sleep(c.retryDelay(attempt+1, 0))
+			continue
+		}
+
+		statusCode := resp.StatusCode
+		if statusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("musicbrainz unexpected status: %d", statusCode)
+			if !c.shouldRetryStatus(statusCode) || attempt == c.retryCount() {
+				break
+			}
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, retryAfter)
+			time.Sleep(c.retryDelay(attempt+1, retryAfter))
+			continue
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("musicbrainz decode failed: %w", err)
+			if !c.shouldRetryRequest(err) || attempt == c.retryCount() {
+				break
+			}
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, 0)
+			time.Sleep(c.retryDelay(attempt+1, 0))
+			continue
+		}
+		resp.Body.Close()
+		return nil
+	}
+
+	return lastErr
+}
+
+func (c *Client) doMusicBrainzBytesGet(reqURL, accept string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= c.retryCount(); attempt++ {
+		c.rateLimit()
+
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request failed: %w", err)
+		}
+		req.Header.Set("User-Agent", c.cfg.UserAgent)
+		req.Header.Set("Accept", accept)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("musicbrainz request failed: %w", err)
+			if !c.shouldRetryRequest(err) || attempt == c.retryCount() {
+				break
+			}
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, 0)
+			time.Sleep(c.retryDelay(attempt+1, 0))
+			continue
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("musicbrainz read failed: %w", readErr)
+			if !c.shouldRetryRequest(readErr) || attempt == c.retryCount() {
+				break
+			}
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, 0)
+			time.Sleep(c.retryDelay(attempt+1, 0))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("musicbrainz unexpected status: %d", resp.StatusCode)
+			if !c.shouldRetryStatus(resp.StatusCode) || attempt == c.retryCount() {
+				break
+			}
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, retryAfter)
+			time.Sleep(c.retryDelay(attempt+1, retryAfter))
+			continue
+		}
+		if len(body) == 0 {
+			lastErr = fmt.Errorf("musicbrainz response is empty")
+			if attempt == c.retryCount() {
+				break
+			}
+			c.logRetry(reqURL, attempt+1, c.retryCount(), lastErr, 0)
+			time.Sleep(c.retryDelay(attempt+1, 0))
+			continue
+		}
+
+		return body, nil
+	}
+
+	return nil, lastErr
+}
+
+func (c *Client) retryCount() int {
+	if c == nil || c.cfg == nil || c.cfg.RetryCount < 0 {
+		return 0
+	}
+	return c.cfg.RetryCount
+}
+
+func (c *Client) shouldRetryStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return statusCode >= 500
+	}
+}
+
+func (c *Client) shouldRetryRequest(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		if temporary, ok := interface{}(netErr).(interface{ Temporary() bool }); ok && temporary.Temporary() {
+			return true
+		}
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection reset by peer") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "tls handshake timeout") ||
+		strings.Contains(message, "server misbehaving")
+}
+
+func (c *Client) retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return retryAfter
+	}
+	base := 200 * time.Millisecond
+	delay := base << max(attempt-1, 0)
+	if delay > 3*time.Second {
+		return 3 * time.Second
+	}
+	return delay
+}
+
+func (c *Client) logRetry(reqURL string, attempt, retries int, err error, retryAfter time.Duration) {
+	fields := []zap.Field{
+		zap.String("url", reqURL),
+		zap.Int("retry_attempt", attempt),
+		zap.Int("retry_max", retries),
+		zap.Error(err),
+	}
+	if retryAfter > 0 {
+		fields = append(fields, zap.Duration("retry_after", retryAfter))
+	}
+	c.logger.Warn("musicbrainz request retrying", fields...)
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		delay := time.Until(when)
+		if delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 // extractAlbumArtist 从搜索结果中提取 Album Artist

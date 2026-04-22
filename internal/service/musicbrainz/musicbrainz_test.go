@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,5 +173,79 @@ func TestLookupTrackMetadataByReleaseFillsTrackMetadata(t *testing.T) {
 	if metadata.MusicBrainzRecordingID != "rec-1" || metadata.MusicBrainzReleaseID != "rel-1" || metadata.MusicBrainzReleaseGroupID != "rg-1" {
 		t.Fatalf("unexpected musicbrainz ids: recording=%q release=%q release_group=%q",
 			metadata.MusicBrainzRecordingID, metadata.MusicBrainzReleaseID, metadata.MusicBrainzReleaseGroupID)
+	}
+}
+
+func TestSearchRecordingsRetriesEOFAndEventuallySucceeds(t *testing.T) {
+	var attempts atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := attempts.Add(1)
+		if current <= 2 {
+			hjacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer does not support hijacking")
+			}
+			conn, _, err := hjacker.Hijack()
+			if err != nil {
+				t.Fatalf("hijack failed: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"recordings":[{"id":"rec-1","title":"Song"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(&config.MusicBrainzConfig{
+		Enabled:     true,
+		BaseURL:     server.URL,
+		UserAgent:   "test-agent",
+		RateLimitMs: 0,
+		Timeout:     5 * time.Second,
+		RetryCount:  2,
+	}, zap.NewNop())
+
+	result, err := client.searchRecordings(`recording:"Song"`, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Recordings) != 1 || result.Recordings[0].ID != "rec-1" {
+		t.Fatalf("unexpected result: %+v", result.Recordings)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("unexpected attempts: %d", got)
+	}
+}
+
+func TestSearchReleasesDoesNotRetryBadRequest(t *testing.T) {
+	var attempts atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewClient(&config.MusicBrainzConfig{
+		Enabled:     true,
+		BaseURL:     server.URL,
+		UserAgent:   "test-agent",
+		RateLimitMs: 0,
+		Timeout:     5 * time.Second,
+		RetryCount:  3,
+	}, zap.NewNop())
+
+	_, err := client.searchReleases(`release:"Bad"`, 5)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "musicbrainz unexpected status: 400") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("unexpected attempts: %d", got)
 	}
 }
