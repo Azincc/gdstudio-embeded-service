@@ -99,6 +99,13 @@ func (r *Resolver) ResolveCandidates(
 	} else {
 		current = mergeMetadataFallback(readCurrent, currentFallback)
 	}
+	if sidecarLyrics, sidecarErr := readSidecarLyrics(absolutePath); sidecarErr == nil {
+		current.Lyrics = preferCurrentLyrics(current.Lyrics, sidecarLyrics)
+	} else if !os.IsNotExist(sidecarErr) {
+		r.logger.Debug("failed to read sidecar lyrics",
+			zap.String("path", absolutePath),
+			zap.Error(sidecarErr))
+	}
 
 	candidates := make([]model.MetadataCandidate, 0, 4)
 	seen := map[string]struct{}{}
@@ -359,24 +366,8 @@ func readFLACMetadata(path string) (model.EditableMetadata, error) {
 		return model.EditableMetadata{}, fmt.Errorf("metaflac export failed: %w", err)
 	}
 
-	values := map[string]string{}
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		idx := strings.Index(line, "=")
-		if idx <= 0 {
-			continue
-		}
-		key := strings.ToUpper(strings.TrimSpace(line[:idx]))
-		value := strings.TrimSpace(line[idx+1:])
-		if _, exists := values[key]; !exists {
-			values[key] = value
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	values, err := parseMetaflacTags(output)
+	if err != nil {
 		return model.EditableMetadata{}, err
 	}
 
@@ -419,4 +410,92 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseMetaflacTags(output []byte) (map[string]string, error) {
+	values := map[string]string{}
+	var currentKey string
+
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		rawLine := strings.TrimRight(scanner.Text(), "\r")
+
+		if idx := strings.Index(rawLine, "="); idx > 0 {
+			key := strings.ToUpper(strings.TrimSpace(rawLine[:idx]))
+			if isMetaflacTagKey(key) {
+				if _, exists := values[key]; !exists {
+					values[key] = strings.TrimSpace(rawLine[idx+1:])
+				}
+				currentKey = key
+				continue
+			}
+		}
+
+		if currentKey == "" {
+			continue
+		}
+
+		// metaflac 导出的多行值会把后续行直接续写到下一行，这里把它们拼回原值。
+		values[currentKey] += "\n" + rawLine
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return values, nil
+}
+
+func isMetaflacTagKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, r := range key {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func readSidecarLyrics(audioPath string) (string, error) {
+	lrcPath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".lrc"
+	data, err := os.ReadFile(lrcPath)
+	if err != nil {
+		return "", err
+	}
+	return normalizeLyricsText(string(data)), nil
+}
+
+func preferCurrentLyrics(currentLyrics, sidecarLyrics string) string {
+	currentLyrics = normalizeLyricsText(currentLyrics)
+	sidecarLyrics = normalizeLyricsText(sidecarLyrics)
+
+	switch {
+	case sidecarLyrics == "":
+		return currentLyrics
+	case currentLyrics == "":
+		return sidecarLyrics
+	case currentLyrics == sidecarLyrics:
+		return currentLyrics
+	case countLyricsLines(sidecarLyrics) > countLyricsLines(currentLyrics):
+		return sidecarLyrics
+	case len(sidecarLyrics) > len(currentLyrics) && !strings.Contains(currentLyrics, "\n"):
+		return sidecarLyrics
+	default:
+		return currentLyrics
+	}
+}
+
+func normalizeLyricsText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.TrimSpace(value)
+}
+
+func countLyricsLines(value string) int {
+	value = normalizeLyricsText(value)
+	if value == "" {
+		return 0
+	}
+	return strings.Count(value, "\n") + 1
 }
