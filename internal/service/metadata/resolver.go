@@ -84,7 +84,14 @@ func ResolveSongPath(cfg *config.Config, rawPath string) (string, error) {
 
 func (r *Resolver) ResolveCandidates(
 	song model.SongMetadataReference,
+	progress func(status, message string),
 ) (*model.MetadataCandidatesResponse, string, error) {
+	reportProgress := func(status, message string) {
+		if progress != nil {
+			progress(status, message)
+		}
+	}
+
 	absolutePath, err := ResolveSongPath(r.cfg, song.Path)
 	if err != nil {
 		return nil, "", err
@@ -130,6 +137,7 @@ func (r *Resolver) ResolveCandidates(
 	lookupArtist := firstNonEmpty(current.Artist, song.Artist)
 	lookupAlbum := firstNonEmpty(current.Album, song.Album)
 
+	reportProgress(model.MetadataCandidatesJobStatusMatchingFingerprint, "")
 	if r.mbClient != nil {
 		if fpMeta, fpErr := r.mbClient.LookupTrackMetadataByFingerprint(absolutePath); fpErr != nil {
 			r.logger.Warn("fingerprint candidate lookup failed",
@@ -138,7 +146,10 @@ func (r *Resolver) ResolveCandidates(
 		} else if fpMeta != nil {
 			addCandidate("musicbrainz_fingerprint", 0.97, editableFromFingerprint(fpMeta))
 		}
+	}
 
+	reportProgress(model.MetadataCandidatesJobStatusSearchingSong, "")
+	if r.mbClient != nil {
 		if mbMeta, mbErr := r.mbClient.LookupTrackMetadata(lookupTitle, lookupArtist, lookupAlbum); mbErr != nil {
 			r.logger.Warn("musicbrainz search candidate lookup failed",
 				zap.String("title", lookupTitle),
@@ -185,6 +196,7 @@ func (r *Resolver) ResolveCandidates(
 		}
 	}
 
+	reportProgress(model.MetadataCandidatesJobStatusMergingData, "")
 	return &model.MetadataCandidatesResponse{
 		Current:    sanitizeEditableMetadata(current),
 		Candidates: candidates,

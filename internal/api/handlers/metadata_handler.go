@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -15,20 +16,23 @@ import (
 )
 
 type MetadataHandler struct {
-	resolver *metadata.Resolver
-	repo     *repository.MetadataJobRepository
-	logger   *zap.Logger
+	resolver       *metadata.Resolver
+	applyRepo      *repository.MetadataJobRepository
+	candidatesRepo *repository.MetadataCandidatesJobRepository
+	logger         *zap.Logger
 }
 
 func NewMetadataHandler(
 	resolver *metadata.Resolver,
-	repo *repository.MetadataJobRepository,
+	applyRepo *repository.MetadataJobRepository,
+	candidatesRepo *repository.MetadataCandidatesJobRepository,
 	logger *zap.Logger,
 ) *MetadataHandler {
 	return &MetadataHandler{
-		resolver: resolver,
-		repo:     repo,
-		logger:   logger,
+		resolver:       resolver,
+		applyRepo:      applyRepo,
+		candidatesRepo: candidatesRepo,
+		logger:         logger,
 	}
 }
 
@@ -52,7 +56,7 @@ func (h *MetadataHandler) Candidates(c *gin.Context) {
 		return
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(req.Song)
+	response, _, err := h.resolver.ResolveCandidates(req.Song, nil)
 	if err != nil {
 		h.logger.Warn("resolve metadata candidates failed",
 			zap.String("song_id", req.Song.ID),
@@ -63,6 +67,68 @@ func (h *MetadataHandler) Candidates(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
+	var req MetadataCandidatesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	job := &model.MetadataCandidatesJob{
+		ID:        uuid.New().String(),
+		SongID:    strings.TrimSpace(req.Song.ID),
+		LibraryID: strings.TrimSpace(req.Song.LibraryID),
+		SongPath:  strings.TrimSpace(req.Song.Path),
+		Status:    model.MetadataCandidatesJobStatusQueued,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := h.candidatesRepo.Create(job); err != nil {
+		h.logger.Error("create metadata candidates job failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create metadata candidates job"})
+		return
+	}
+
+	go h.processCandidatesJob(job.ID, req.Song)
+
+	c.JSON(http.StatusOK, gin.H{
+		"job_id": job.ID,
+		"status": job.Status,
+	})
+}
+
+func (h *MetadataHandler) GetCandidatesJob(c *gin.Context) {
+	jobID := c.Param("id")
+	job, err := h.candidatesRepo.FindByID(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+
+	var result *model.MetadataCandidatesResponse
+	if strings.TrimSpace(job.ResultJSON) != "" {
+		var parsed model.MetadataCandidatesResponse
+		if err := json.Unmarshal([]byte(job.ResultJSON), &parsed); err != nil {
+			h.logger.Error("decode metadata candidates job result failed",
+				zap.String("job_id", job.ID),
+				zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode metadata candidates result"})
+			return
+		}
+		result = &parsed
+	}
+
+	c.JSON(http.StatusOK, model.MetadataCandidatesJobResponse{
+		JobID:     job.ID,
+		Status:    job.Status,
+		Message:   job.Message,
+		Error:     job.Error,
+		Result:    result,
+		CreatedAt: job.CreatedAt,
+		UpdatedAt: job.UpdatedAt,
+	})
 }
 
 func (h *MetadataHandler) Apply(c *gin.Context) {
@@ -101,7 +167,7 @@ func (h *MetadataHandler) Apply(c *gin.Context) {
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
-	if err := h.repo.Create(job); err != nil {
+	if err := h.applyRepo.Create(job); err != nil {
 		h.logger.Error("create metadata job failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create metadata job"})
 		return
@@ -115,10 +181,51 @@ func (h *MetadataHandler) Apply(c *gin.Context) {
 
 func (h *MetadataHandler) GetJob(c *gin.Context) {
 	jobID := c.Param("id")
-	job, err := h.repo.FindByID(jobID)
+	job, err := h.applyRepo.FindByID(jobID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
 		return
 	}
 	c.JSON(http.StatusOK, job)
+}
+
+func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMetadataReference) {
+	reportProgress := func(status, message string) {
+		if err := h.candidatesRepo.UpdateStatus(jobID, status, message); err != nil {
+			h.logger.Warn("update metadata candidates job status failed",
+				zap.String("job_id", jobID),
+				zap.Error(err))
+		}
+	}
+
+	response, _, err := h.resolver.ResolveCandidates(song, reportProgress)
+	if err != nil {
+		h.logger.Warn("process metadata candidates job failed",
+			zap.String("job_id", jobID),
+			zap.String("song_id", song.ID),
+			zap.Error(err))
+		if markErr := h.candidatesRepo.MarkFailed(jobID, err); markErr != nil {
+			h.logger.Warn("mark metadata candidates job failed failed",
+				zap.String("job_id", jobID),
+				zap.Error(markErr))
+		}
+		return
+	}
+
+	resultJSON, err := json.Marshal(response)
+	if err != nil {
+		marshalErr := fmt.Errorf("encode metadata candidates response failed: %w", err)
+		if markErr := h.candidatesRepo.MarkFailed(jobID, marshalErr); markErr != nil {
+			h.logger.Warn("mark metadata candidates job failed after encode error",
+				zap.String("job_id", jobID),
+				zap.Error(markErr))
+		}
+		return
+	}
+
+	if err := h.candidatesRepo.MarkDone(jobID, string(resultJSON), "candidates ready"); err != nil {
+		h.logger.Warn("mark metadata candidates job done failed",
+			zap.String("job_id", jobID),
+			zap.Error(err))
+	}
 }

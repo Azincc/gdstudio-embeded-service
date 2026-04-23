@@ -65,6 +65,36 @@ type MetadataCandidatesResponse struct {
 	Candidates []MetadataCandidate `json:"candidates"`
 }
 
+// MetadataCandidatesJob stores async metadata candidate lookup work.
+type MetadataCandidatesJob struct {
+	ID         string         `gorm:"primaryKey;size:64" json:"job_id"`
+	SongID     string         `gorm:"size:128;index" json:"song_id"`
+	LibraryID  string         `gorm:"size:64;index" json:"library_id"`
+	SongPath   string         `gorm:"size:1024" json:"song_path"`
+	Status     string         `gorm:"size:32;index" json:"status"`
+	Message    string         `gorm:"size:512" json:"message"`
+	Error      string         `gorm:"size:1024" json:"error"`
+	ResultJSON string         `gorm:"type:text" json:"-"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+func (MetadataCandidatesJob) TableName() string {
+	return "metadata_candidate_jobs"
+}
+
+// MetadataCandidatesJobResponse is returned by the async candidates job API.
+type MetadataCandidatesJobResponse struct {
+	JobID     string                      `json:"job_id"`
+	Status    string                      `json:"status"`
+	Message   string                      `json:"message,omitempty"`
+	Error     string                      `json:"error,omitempty"`
+	Result    *MetadataCandidatesResponse `json:"result,omitempty"`
+	CreatedAt time.Time                   `json:"created_at"`
+	UpdatedAt time.Time                   `json:"updated_at"`
+}
+
 // MetadataJob stores async metadata apply work.
 type MetadataJob struct {
 	ID           string         `gorm:"primaryKey;size:64" json:"job_id"`
@@ -86,6 +116,13 @@ func (MetadataJob) TableName() string {
 }
 
 const (
+	MetadataCandidatesJobStatusQueued              = "queued"
+	MetadataCandidatesJobStatusMatchingFingerprint = "matching_fingerprint"
+	MetadataCandidatesJobStatusSearchingSong       = "searching_song"
+	MetadataCandidatesJobStatusMergingData         = "merging_data"
+	MetadataCandidatesJobStatusDone                = "done"
+	MetadataCandidatesJobStatusFailed              = "failed"
+
 	MetadataJobStatusQueued          = "queued"
 	MetadataJobStatusReading         = "reading"
 	MetadataJobStatusResolvingCover  = "resolving_cover"

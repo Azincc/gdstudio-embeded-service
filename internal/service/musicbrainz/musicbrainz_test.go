@@ -5,6 +5,9 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -247,5 +250,76 @@ func TestSearchReleasesDoesNotRetryBadRequest(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("unexpected attempts: %d", got)
+	}
+}
+
+func TestLookupTrackMetadataByFingerprintIgnoresCoverFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/lookup":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok","results":[{"score":0.99,"recordings":[{"id":"rec-1","title":"Song","artists":[{"name":"Artist"}],"releasegroups":[{"id":"rg-1","title":"Album"}]}]}]}`))
+		case r.URL.Path == "/recording/" && r.URL.Query().Get("query") != "":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"recordings":[{"id":"rec-1","title":"Song","artist-credit":[{"name":"Artist","artist":{"name":"Artist"}}],"first-release-date":"2025-04-23","releases":[{"id":"rel-1","title":"Album","date":"2025-04-23","status":"Official","artist-credit":[{"name":"Artist","artist":{"name":"Artist"}}],"release-group":{"id":"rg-1","title":"Album"},"media":[{"position":1,"track":[{"number":"1","title":"Song"}]}]}]}]}`))
+		case strings.HasSuffix(r.URL.Path, "/front"):
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	audioPath := filepath.Join(tempDir, "song.mp3")
+	if err := os.WriteFile(audioPath, []byte("stub"), 0600); err != nil {
+		t.Fatalf("write temp audio file failed: %v", err)
+	}
+	fpcalcPath := filepath.Join(tempDir, "fpcalc")
+	fpcalcScript := "#!/bin/sh\n" +
+		"echo '{\"duration\":212,\"fingerprint\":\"abc123\"}'\n"
+	if runtime.GOOS == "windows" {
+		fpcalcPath += ".bat"
+		fpcalcScript = "@echo {\"duration\":212,\"fingerprint\":\"abc123\"}\r\n"
+	}
+	if err := os.WriteFile(fpcalcPath, []byte(fpcalcScript), 0700); err != nil {
+		t.Fatalf("write fpcalc stub failed: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(fpcalcPath, 0700); err != nil {
+			t.Fatalf("chmod fpcalc stub failed: %v", err)
+		}
+	}
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := NewClient(&config.MusicBrainzConfig{
+		Enabled:        true,
+		BaseURL:        server.URL,
+		CoverArtURL:    server.URL,
+		AcoustIDURL:    server.URL,
+		AcoustIDClient: "test-client",
+		UserAgent:      "test-agent",
+		RateLimitMs:    0,
+		Timeout:        5 * time.Second,
+	}, zap.NewNop())
+
+	metadata, err := client.LookupTrackMetadataByFingerprint(audioPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if metadata == nil {
+		t.Fatal("expected metadata")
+	}
+	if metadata.Title != "Song" || metadata.Artist != "Artist" || metadata.Album != "Album" {
+		t.Fatalf("unexpected metadata basics: %+v", metadata)
+	}
+	if metadata.TrackNumber != 1 || metadata.DiscNumber != 1 {
+		t.Fatalf("unexpected track position: track=%d disc=%d", metadata.TrackNumber, metadata.DiscNumber)
+	}
+	if metadata.CoverURL != "" {
+		t.Fatalf("expected empty cover url when cover fetch fails, got %q", metadata.CoverURL)
+	}
+	if len(metadata.CoverData) != 0 {
+		t.Fatalf("expected empty cover data when cover fetch fails, got %d bytes", len(metadata.CoverData))
 	}
 }

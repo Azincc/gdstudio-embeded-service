@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	Version   = "0.2.7"
+	Version   = "0.2.9"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -65,6 +65,7 @@ func main() {
 	// 初始化仓库
 	jobRepo := repository.NewJobRepository(db)
 	metadataJobRepo := repository.NewMetadataJobRepository(db)
+	metadataCandidatesJobRepo := repository.NewMetadataCandidatesJobRepository(db)
 
 	gdClient := gdstudio.NewClient(&cfg.GDStudio, log)
 	var mbClient *musicbrainz.Client
@@ -75,7 +76,12 @@ func main() {
 
 	// 初始化 Handler
 	jobHandler := handlers.NewJobHandler(cfg, jobRepo, log, Version)
-	metadataHandler := handlers.NewMetadataHandler(metadataResolver, metadataJobRepo, log)
+	metadataHandler := handlers.NewMetadataHandler(
+		metadataResolver,
+		metadataJobRepo,
+		metadataCandidatesJobRepo,
+		log,
+	)
 
 	// 设置路由
 	router := api.SetupRouter(cfg, jobHandler, metadataHandler)

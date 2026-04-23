@@ -40,6 +40,8 @@ func SetupRouter(
 		v1.POST("/jobs/batch-delete", jobHandler.BatchDelete)
 		if metadataHandler != nil {
 			v1.POST("/metadata/candidates", metadataHandler.Candidates)
+			v1.POST("/metadata/candidates/jobs", metadataHandler.CreateCandidatesJob)
+			v1.GET("/metadata/candidates/jobs/:id", metadataHandler.GetCandidatesJob)
 			v1.POST("/metadata/apply", metadataHandler.Apply)
 			v1.GET("/metadata/jobs/:id", metadataHandler.GetJob)
 		}
