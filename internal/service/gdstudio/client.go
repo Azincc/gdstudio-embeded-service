@@ -19,6 +19,9 @@ import (
 // ErrMetadataNotFound 表示查询正常完成，但没有找到可信的曲目匹配。
 var ErrMetadataNotFound = errors.New("metadata not found from search")
 
+// ErrMetadataEmptyResponse 表示 GMusic 搜索接口异常返回了空列表，应继续重试。
+var ErrMetadataEmptyResponse = errors.New("gdmusic metadata search returned empty list")
+
 // Client GDStudio API 客户端
 type Client struct {
 	cfg    *config.GDStudioConfig
@@ -83,6 +86,8 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 	}
 
 	var lastErr error
+	sawEmptyResponse := false
+	sawNonEmptyResponse := false
 	for _, keyword := range keywords {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -93,8 +98,10 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 			continue
 		}
 		if len(items) == 0 {
+			sawEmptyResponse = true
 			continue
 		}
+		sawNonEmptyResponse = true
 
 		if metadata, ok := pickMetadata(items, trackID, title, artist); ok {
 			c.logger.Debug("resolved metadata from gdstudio search",
@@ -113,7 +120,13 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, ErrMetadataNotFound
+	if sawEmptyResponse {
+		return nil, ErrMetadataEmptyResponse
+	}
+	if sawNonEmptyResponse {
+		return nil, ErrMetadataNotFound
+	}
+	return nil, ErrMetadataEmptyResponse
 }
 
 // ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
@@ -128,6 +141,11 @@ func (c *Client) ResolveAuxIDs(source, trackID, title, artist string) (string, s
 
 // ResolveURL 解析播放链接
 func (c *Client) ResolveURL(source, trackID string, br int) (*URLResult, error) {
+	return c.ResolveURLContext(context.Background(), source, trackID, br)
+}
+
+// ResolveURLContext 解析播放链接，并支持取消请求。
+func (c *Client) ResolveURLContext(ctx context.Context, source, trackID string, br int) (*URLResult, error) {
 	c.logger.Info("resolving url",
 		zap.String("source", source),
 		zap.String("track_id", trackID),
@@ -138,6 +156,7 @@ func (c *Client) ResolveURL(source, trackID string, br int) (*URLResult, error) 
 
 	var result map[string]interface{}
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(map[string]string{
 			"types":  "url",
 			"source": source,
@@ -193,6 +212,11 @@ func (c *Client) ResolveURL(source, trackID string, br int) (*URLResult, error) 
 
 // ResolveCover 解析封面
 func (c *Client) ResolveCover(source, picID string) (string, error) {
+	return c.ResolveCoverContext(context.Background(), source, picID)
+}
+
+// ResolveCoverContext 解析封面，并支持取消请求。
+func (c *Client) ResolveCoverContext(ctx context.Context, source, picID string) (string, error) {
 	if picID == "" {
 		return "", nil
 	}
@@ -201,7 +225,7 @@ func (c *Client) ResolveCover(source, picID string) (string, error) {
 	sizes := []int{1000, 640, 500, 300}
 	var lastErr error
 	for _, size := range sizes {
-		coverURL, err := c.resolveCoverWithSize(source, picID, size)
+		coverURL, err := c.resolveCoverWithSizeContext(ctx, source, picID, size)
 		if err == nil {
 			return coverURL, nil
 		}
@@ -216,6 +240,10 @@ func (c *Client) ResolveCover(source, picID string) (string, error) {
 }
 
 func (c *Client) resolveCoverWithSize(source, picID string, size int) (string, error) {
+	return c.resolveCoverWithSizeContext(context.Background(), source, picID, size)
+}
+
+func (c *Client) resolveCoverWithSizeContext(ctx context.Context, source, picID string, size int) (string, error) {
 	c.logger.Debug("resolving cover",
 		zap.String("source", source),
 		zap.String("pic_id", picID),
@@ -226,6 +254,7 @@ func (c *Client) resolveCoverWithSize(source, picID string, size int) (string, e
 
 	var result map[string]interface{}
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(map[string]string{
 			"types":  "pic",
 			"source": source,
@@ -257,6 +286,11 @@ func (c *Client) resolveCoverWithSize(source, picID string, size int) (string, e
 
 // ResolveLyrics 解析歌词
 func (c *Client) ResolveLyrics(source, lyricID string) (*LyricResult, error) {
+	return c.ResolveLyricsContext(context.Background(), source, lyricID)
+}
+
+// ResolveLyricsContext 解析歌词，并支持取消请求。
+func (c *Client) ResolveLyricsContext(ctx context.Context, source, lyricID string) (*LyricResult, error) {
 	if lyricID == "" {
 		return nil, nil
 	}
@@ -270,6 +304,7 @@ func (c *Client) ResolveLyrics(source, lyricID string) (*LyricResult, error) {
 
 	var result map[string]interface{}
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(map[string]string{
 			"types":  "lyric",
 			"source": source,
@@ -309,6 +344,11 @@ func (c *Client) ResolveLyrics(source, lyricID string) (*LyricResult, error) {
 
 // DownloadCover 下载封面数据
 func (c *Client) DownloadCover(source, coverURL string) ([]byte, error) {
+	return c.DownloadCoverContext(context.Background(), source, coverURL)
+}
+
+// DownloadCoverContext 下载封面数据，并支持取消请求。
+func (c *Client) DownloadCoverContext(ctx context.Context, source, coverURL string) ([]byte, error) {
 	if coverURL == "" {
 		return nil, nil
 	}
@@ -319,6 +359,7 @@ func (c *Client) DownloadCover(source, coverURL string) ([]byte, error) {
 
 	for _, candidate := range candidates {
 		req := c.client.R().
+			SetContext(ctx).
 			SetHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 		if referer != "" {
 			req.SetHeader("Referer", referer)

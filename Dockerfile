@@ -49,6 +49,20 @@ RUN cat <<'EOF' > /app/start.sh
 #!/bin/sh
 set -eu
 
+api_pid=""
+worker_pid=""
+
+shutdown() {
+  set +e
+  [ -z "$api_pid" ] || kill -TERM "$api_pid" 2>/dev/null
+  [ -z "$worker_pid" ] || kill -TERM "$worker_pid" 2>/dev/null
+  [ -z "$api_pid" ] || wait "$api_pid"
+  [ -z "$worker_pid" ] || wait "$worker_pid"
+  exit 0
+}
+
+trap shutdown TERM INT
+
 echo "Starting GDStudio Embed Service..."
 ./api &
 api_pid=$!
@@ -62,12 +76,20 @@ echo "Worker started with PID $worker_pid"
 
 while :; do
   if ! kill -0 "$api_pid" 2>/dev/null; then
+    set +e
     wait "$api_pid"
-    exit $?
+    status=$?
+    kill -TERM "$worker_pid" 2>/dev/null
+    wait "$worker_pid" 2>/dev/null
+    exit "$status"
   fi
   if ! kill -0 "$worker_pid" 2>/dev/null; then
+    set +e
     wait "$worker_pid"
-    exit $?
+    status=$?
+    kill -TERM "$api_pid" 2>/dev/null
+    wait "$api_pid" 2>/dev/null
+    exit "$status"
   fi
   sleep 1
 done

@@ -47,6 +47,10 @@ type Job struct {
 	RetryCount  int        `json:"retry_count"`
 	LastRetryAt *time.Time `json:"last_retry_at"`
 
+	// 租约信息用于防止多个 Worker 重复处理，并让崩溃后的任务可被重新领取。
+	LeaseOwner     string     `gorm:"size:128;index" json:"-"`
+	LeaseExpiresAt *time.Time `gorm:"index" json:"-"`
+
 	// 时间戳
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

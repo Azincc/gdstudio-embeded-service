@@ -3,9 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/model"
@@ -76,15 +79,21 @@ func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	requestJSON, err := json.Marshal(req.Song)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode metadata candidates request"})
+		return
+	}
 
 	job := &model.MetadataCandidatesJob{
-		ID:        uuid.New().String(),
-		SongID:    strings.TrimSpace(req.Song.ID),
-		LibraryID: strings.TrimSpace(req.Song.LibraryID),
-		SongPath:  strings.TrimSpace(req.Song.Path),
-		Status:    model.MetadataCandidatesJobStatusQueued,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:          uuid.New().String(),
+		SongID:      strings.TrimSpace(req.Song.ID),
+		LibraryID:   strings.TrimSpace(req.Song.LibraryID),
+		SongPath:    strings.TrimSpace(req.Song.Path),
+		RequestJSON: string(requestJSON),
+		Status:      model.MetadataCandidatesJobStatusQueued,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
 	if err := h.candidatesRepo.Create(job); err != nil {
 		h.logger.Error("create metadata candidates job failed", zap.Error(err))
@@ -98,8 +107,6 @@ func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
 		zap.String("path", job.SongPath),
 		zap.String("title", req.Song.Title),
 		zap.String("artist", req.Song.Artist))
-
-	go h.processCandidatesJob(job.ID, req.Song)
 
 	c.JSON(http.StatusOK, gin.H{
 		"job_id": job.ID,
@@ -204,7 +211,115 @@ func (h *MetadataHandler) GetJob(c *gin.Context) {
 	c.JSON(http.StatusOK, job)
 }
 
-func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMetadataReference) {
+// RunCandidates 运行带租约的候选任务队列，并自动恢复租约过期的任务。
+func (h *MetadataHandler) RunCandidates(ctx context.Context, concurrency int, pollInterval time.Duration) {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+
+	ownerPrefix := uuid.NewString() + "-candidates"
+	var wg sync.WaitGroup
+	for slot := 1; slot <= concurrency; slot++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			h.candidatesLoop(ctx, ownerPrefix+"-"+strconv.Itoa(slot), pollInterval)
+		}(slot)
+	}
+	wg.Wait()
+}
+
+func (h *MetadataHandler) candidatesLoop(ctx context.Context, owner string, pollInterval time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		job, err := h.candidatesRepo.ClaimNext(owner, repository.DefaultLeaseDuration)
+		if err != nil {
+			h.logger.Warn("claim metadata candidates job failed", zap.Error(err))
+			if !waitCandidatesPoll(ctx, pollInterval) {
+				return
+			}
+			continue
+		}
+		if job == nil {
+			if !waitCandidatesPoll(ctx, pollInterval) {
+				return
+			}
+			continue
+		}
+
+		var song model.SongMetadataReference
+		if strings.TrimSpace(job.RequestJSON) == "" {
+			song = model.SongMetadataReference{
+				ID:        job.SongID,
+				Path:      job.SongPath,
+				LibraryID: job.LibraryID,
+			}
+		} else if err := json.Unmarshal([]byte(job.RequestJSON), &song); err != nil {
+			decodeErr := fmt.Errorf("decode metadata candidates request failed: %w", err)
+			if markErr := h.candidatesRepo.MarkFailed(job.ID, job.LeaseOwner, decodeErr); markErr != nil {
+				h.logger.Warn("mark invalid metadata candidates job failed",
+					zap.String("job_id", job.ID),
+					zap.Error(markErr))
+			}
+			continue
+		}
+
+		h.runCandidatesLeased(ctx, job, song)
+	}
+}
+
+func (h *MetadataHandler) runCandidatesLeased(
+	ctx context.Context,
+	job *model.MetadataCandidatesJob,
+	song model.SongMetadataReference,
+) {
+	taskCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(repository.DefaultLeaseHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-taskCtx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := h.candidatesRepo.RenewLease(job.ID, job.LeaseOwner, repository.DefaultLeaseDuration); err != nil {
+					h.logger.Warn("metadata candidates job lease renewal failed; stopping task",
+						zap.String("job_id", job.ID),
+						zap.Error(err))
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	h.processCandidatesJob(taskCtx, job, song)
+	close(done)
+	cancel()
+	if err := h.candidatesRepo.ReleaseLease(job.ID, job.LeaseOwner); err != nil {
+		h.logger.Warn("release metadata candidates job lease failed",
+			zap.String("job_id", job.ID),
+			zap.Error(err))
+	}
+}
+
+func (h *MetadataHandler) processCandidatesJob(
+	ctx context.Context,
+	job *model.MetadataCandidatesJob,
+	song model.SongMetadataReference,
+) {
+	jobID := job.ID
 	startedAt := time.Now()
 	h.logger.Info("metadata candidates job started",
 		zap.String("job_id", jobID),
@@ -214,7 +329,7 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		zap.Strings("sources", []string{"netease", "kuwo"}))
 
 	reportProgress := func(status, message string) {
-		if err := h.candidatesRepo.UpdateStatus(jobID, status, message); err != nil {
+		if err := h.candidatesRepo.UpdateStatus(jobID, job.LeaseOwner, status, message); err != nil {
 			h.logger.Warn("update metadata candidates job status failed",
 				zap.String("job_id", jobID),
 				zap.Error(err))
@@ -226,14 +341,20 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 			zap.String("status", status))
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(context.Background(), song, reportProgress)
+	response, _, err := h.resolver.ResolveCandidates(ctx, song, reportProgress)
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, repository.ErrLeaseLost) {
+			h.logger.Info("metadata candidates job interrupted",
+				zap.String("job_id", jobID),
+				zap.String("song_id", song.ID))
+			return
+		}
 		h.logger.Warn("process metadata candidates job failed",
 			zap.String("job_id", jobID),
 			zap.String("song_id", song.ID),
 			zap.Duration("elapsed", time.Since(startedAt)),
 			zap.Error(err))
-		if markErr := h.candidatesRepo.MarkFailed(jobID, err); markErr != nil {
+		if markErr := h.candidatesRepo.MarkFailed(jobID, job.LeaseOwner, err); markErr != nil {
 			h.logger.Warn("mark metadata candidates job failed failed",
 				zap.String("job_id", jobID),
 				zap.Error(markErr))
@@ -248,7 +369,7 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 			zap.String("job_id", jobID),
 			zap.String("song_id", song.ID),
 			zap.Error(marshalErr))
-		if markErr := h.candidatesRepo.MarkFailed(jobID, marshalErr); markErr != nil {
+		if markErr := h.candidatesRepo.MarkFailed(jobID, job.LeaseOwner, marshalErr); markErr != nil {
 			h.logger.Warn("mark metadata candidates job failed after encode error",
 				zap.String("job_id", jobID),
 				zap.Error(markErr))
@@ -256,7 +377,7 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		return
 	}
 
-	if err := h.candidatesRepo.MarkDone(jobID, string(resultJSON), "candidates ready"); err != nil {
+	if err := h.candidatesRepo.MarkDone(jobID, job.LeaseOwner, string(resultJSON), "candidates ready"); err != nil {
 		h.logger.Warn("mark metadata candidates job done failed",
 			zap.String("job_id", jobID),
 			zap.Error(err))
@@ -267,4 +388,15 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		zap.String("song_id", song.ID),
 		zap.Int("candidate_count", len(response.Candidates)),
 		zap.Duration("elapsed", time.Since(startedAt)))
+}
+
+func waitCandidatesPoll(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

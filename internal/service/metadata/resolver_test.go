@@ -2,10 +2,12 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,7 +149,7 @@ func TestResolveCandidatesTreatsNoMatchAsSuccessfulEmptyResult(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[{"id":"unrelated","name":"Another Song","artist":"Other Artist","album":"Other Album"}]`))
 	}))
 	defer server.Close()
 
@@ -186,5 +188,80 @@ func TestResolveCandidatesTreatsNoMatchAsSuccessfulEmptyResult(t *testing.T) {
 	}
 	if got := observedLogs.FilterMessage("metadata candidate source attempt failed").Len(); got != 0 {
 		t.Fatalf("expected no warning attempts for no-match results, got %d", got)
+	}
+}
+
+func TestResolveCandidatesRetriesEmptyListsUntilContextExpires(t *testing.T) {
+	musicDir := t.TempDir()
+	audioPath := filepath.Join(musicDir, "song.ogg")
+	if err := os.WriteFile(audioPath, []byte("stub"), 0600); err != nil {
+		t.Fatalf("write temp audio file failed: %v", err)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	logger := zap.NewNop()
+	gdClient := gdstudio.NewClient(&config.GDStudioConfig{
+		BaseURL: server.URL,
+		Timeout: time.Second,
+	}, logger)
+	resolver := NewResolver(
+		&config.Config{Storage: config.StorageConfig{MusicDir: musicDir}},
+		gdClient,
+		logger,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	response, _, err := resolver.ResolveCandidates(
+		ctx,
+		model.SongMetadataReference{
+			ID:     "song-empty-response",
+			Path:   "song.ogg",
+			Title:  "Missing Song",
+			Artist: "Missing Artist",
+		},
+		nil,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected retries to stop at the context deadline, got %v", err)
+	}
+	if response != nil {
+		t.Fatalf("expected no candidate response for repeated empty lists, got %#v", response)
+	}
+	if requests.Load() <= 4 {
+		t.Fatalf("expected empty lists to trigger another attempt, got %d requests", requests.Load())
+	}
+}
+
+func TestCollectSourceLookupResultsPreservesSuccessfulSource(t *testing.T) {
+	resultCh := make(chan sourceLookupResult, 2)
+	resultCh <- sourceLookupResult{
+		source: "netease",
+		metadata: &gdstudio.MetadataResult{
+			Title:  "Found Song",
+			Artist: "Found Artist",
+		},
+	}
+	resultCh <- sourceLookupResult{
+		source: "kuwo",
+		err:    errors.New("temporary source failure"),
+	}
+
+	resolved, lookupErrors, successful := collectSourceLookupResults(resultCh, 2)
+	if successful != 1 {
+		t.Fatalf("expected one successful source, got %d", successful)
+	}
+	if len(lookupErrors) != 1 {
+		t.Fatalf("expected one source error, got %#v", lookupErrors)
+	}
+	if resolved["netease"] == nil || resolved["netease"].Title != "Found Song" {
+		t.Fatalf("successful source result was not preserved: %#v", resolved)
 	}
 }

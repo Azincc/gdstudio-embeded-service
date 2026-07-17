@@ -30,6 +30,12 @@ type Resolver struct {
 	logger     *zap.Logger
 }
 
+type sourceLookupResult struct {
+	source   string
+	metadata *gdstudio.MetadataResult
+	err      error
+}
+
 func NewResolver(
 	cfg *config.Config,
 	gdClient *gdstudio.Client,
@@ -141,12 +147,6 @@ func (r *Resolver) ResolveCandidates(
 		return nil, absolutePath, fmt.Errorf("gdmusic client is unavailable")
 	}
 
-	type sourceLookupResult struct {
-		source   string
-		metadata *gdstudio.MetadataResult
-		err      error
-	}
-
 	candidateSources := []string{"netease", "kuwo"}
 	resultCh := make(chan sourceLookupResult, len(candidateSources))
 	for _, source := range candidateSources {
@@ -223,22 +223,23 @@ func (r *Resolver) ResolveCandidates(
 		}()
 	}
 
-	resolvedBySource := make(map[string]*gdstudio.MetadataResult, len(candidateSources))
-	lookupErrors := make([]error, 0, len(candidateSources))
-	for range candidateSources {
-		result := <-resultCh
-		if result.err != nil {
-			lookupErrors = append(lookupErrors, fmt.Errorf("%s: %w", result.source, result.err))
-			continue
-		}
-		resolvedBySource[result.source] = result.metadata
+	resolvedBySource, lookupErrors, successfulLookups := collectSourceLookupResults(resultCh, len(candidateSources))
+	if err := ctx.Err(); err != nil {
+		return nil, absolutePath, err
 	}
-	if len(lookupErrors) > 0 {
+	if successfulLookups == 0 && len(lookupErrors) > 0 {
 		return nil, absolutePath, fmt.Errorf(
 			"gdmusic candidate lookup failed after independent retries of up to %s: %w",
 			gdstudio.MetadataRetryMaxElapsed,
 			errors.Join(lookupErrors...),
 		)
+	}
+	if len(lookupErrors) > 0 {
+		r.logger.Warn("metadata candidate lookup completed with partial source failures",
+			zap.String("song_id", song.ID),
+			zap.Int("successful_sources", successfulLookups),
+			zap.Int("failed_sources", len(lookupErrors)),
+			zap.Errors("errors", lookupErrors))
 	}
 
 	for _, source := range candidateSources {
@@ -255,12 +256,12 @@ func (r *Resolver) ResolveCandidates(
 			Year:        gdMeta.Year,
 		}
 		if gdMeta.PicID != "" {
-			if coverURL, coverErr := r.gdClient.ResolveCover(source, gdMeta.PicID); coverErr == nil {
+			if coverURL, coverErr := r.gdClient.ResolveCoverContext(ctx, source, gdMeta.PicID); coverErr == nil {
 				editable.CoverURL = coverURL
 			}
 		}
 		if gdMeta.LyricID != "" {
-			if lyricResult, lyricErr := r.gdClient.ResolveLyrics(source, gdMeta.LyricID); lyricErr == nil && lyricResult != nil {
+			if lyricResult, lyricErr := r.gdClient.ResolveLyricsContext(ctx, source, gdMeta.LyricID); lyricErr == nil && lyricResult != nil {
 				editable.Lyrics = lyricResult.Lyric
 			}
 		}
@@ -277,6 +278,25 @@ func (r *Resolver) ResolveCandidates(
 		Current:    sanitizeEditableMetadata(current),
 		Candidates: candidates,
 	}, absolutePath, nil
+}
+
+func collectSourceLookupResults(
+	resultCh <-chan sourceLookupResult,
+	count int,
+) (map[string]*gdstudio.MetadataResult, []error, int) {
+	resolvedBySource := make(map[string]*gdstudio.MetadataResult, count)
+	lookupErrors := make([]error, 0, count)
+	successfulLookups := 0
+	for i := 0; i < count; i++ {
+		result := <-resultCh
+		if result.err != nil {
+			lookupErrors = append(lookupErrors, fmt.Errorf("%s: %w", result.source, result.err))
+			continue
+		}
+		successfulLookups++
+		resolvedBySource[result.source] = result.metadata
+	}
+	return resolvedBySource, lookupErrors, successfulLookups
 }
 
 func (r *Resolver) DownloadCover(ctx context.Context, rawURL string) ([]byte, error) {

@@ -52,3 +52,23 @@ func TestRetryMetadataRetriesUntilSuccess(t *testing.T) {
 		t.Fatalf("unexpected attempt count: %d", attempts)
 	}
 }
+
+func TestRetryMetadataDoesNotFailBeforeRetryWindow(t *testing.T) {
+	window := 30 * time.Millisecond
+	startedAt := time.Now()
+	err := retryMetadataWithPolicy(
+		context.Background(),
+		window,
+		time.Millisecond,
+		5*time.Millisecond,
+		func(context.Context) error {
+			return errors.New("temporary failure")
+		},
+	)
+	if err == nil {
+		t.Fatal("expected retries to fail after the retry window")
+	}
+	if elapsed := time.Since(startedAt); elapsed < window-5*time.Millisecond {
+		t.Fatalf("retry stopped too early: elapsed=%s window=%s", elapsed, window)
+	}
+}

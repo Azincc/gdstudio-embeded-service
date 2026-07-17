@@ -40,7 +40,7 @@ func retryMetadataWithPolicy(
 	retryCtx, cancel := context.WithTimeout(ctx, maxElapsed)
 	defer cancel()
 
-	startedAt := time.Now()
+	deadline, _ := retryCtx.Deadline()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		if err := retryCtx.Err(); err != nil {
@@ -54,11 +54,17 @@ func retryMetadataWithPolicy(
 		if lastErr == nil {
 			return nil
 		}
+		if err := retryCtx.Err(); err != nil {
+			return fmt.Errorf("metadata retry stopped: %w; last error: %v", err, lastErr)
+		}
 
 		wait := metadataBackoffDelay(baseWait, maxWait, attempt)
-		remaining := maxElapsed - time.Since(startedAt)
-		if remaining <= 0 || wait >= remaining {
-			return lastErr
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("metadata retry stopped: %w; last error: %v", context.DeadlineExceeded, lastErr)
+		}
+		if wait > remaining {
+			wait = remaining
 		}
 
 		timer := time.NewTimer(wait)

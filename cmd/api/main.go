@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
-	"os"
+	"net/http"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/api"
 	"github.com/azin/gdstudio-embed-service/internal/api/handlers"
@@ -19,7 +22,7 @@ import (
 )
 
 var (
-	Version   = "0.2.11"
+	Version   = "0.2.12"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -81,21 +84,42 @@ func main() {
 	// 设置路由
 	router := api.SetupRouter(cfg, jobHandler, metadataHandler)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	candidatesDone := make(chan struct{})
+	go func() {
+		defer close(candidatesDone)
+		metadataHandler.RunCandidates(ctx, cfg.Worker.MaxConcurrent, cfg.Worker.PollInterval)
+	}()
+
 	// 启动服务器
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Info("server listening", zap.String("addr", addr))
-
-	// 优雅关闭
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	serverErr := make(chan error, 1)
 	go func() {
-		if err := router.Run(addr); err != nil && err.Error() != "http: Server closed" {
-			log.Fatal("failed to start server", zap.Error(err))
-		}
+		serverErr <- server.ListenAndServe()
 	}()
 
-	// 等待中断信号
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	select {
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("failed to start server", zap.Error(err))
+		}
+	case <-ctx.Done():
+	}
 
 	log.Info("shutting down server...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Warn("server shutdown failed", zap.Error(err))
+	}
+	stop()
+	<-candidatesDone
 }

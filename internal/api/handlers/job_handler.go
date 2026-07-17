@@ -107,9 +107,11 @@ func (h *JobHandler) Create(c *gin.Context) {
 			// 继续创建新任务
 		} else {
 			h.logger.Info("job already exists", zap.String("job_id", existing.ID))
-			existing.UpdatedAt = time.Now()
-			existing.CreatedAt = time.Now()
-			h.repo.Update(existing)
+			if err := h.repo.Touch(existing.ID); err != nil {
+				h.logger.Warn("failed to touch existing job",
+					zap.String("job_id", existing.ID),
+					zap.Error(err))
+			}
 			c.JSON(http.StatusOK, CreateJobResponse{
 				JobID:   existing.ID,
 				Status:  existing.Status,
@@ -213,14 +215,7 @@ func (h *JobHandler) Retry(c *gin.Context) {
 		return
 	}
 
-	// 重置状态
-	job.Status = model.JobStatusQueued
-	job.Error = ""
-	job.Message = "retrying"
-	job.UpdatedAt = time.Now()
-	job.CreatedAt = time.Now()
-
-	if err := h.repo.Update(job); err != nil {
+	if err := h.repo.ResetForRetry(job.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update job"})
 		return
 	}
@@ -250,11 +245,8 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 		return
 	}
 
-	job.Status = model.JobStatusCancelled
-	job.Message = "cancelled by user"
-
-	if err := h.repo.Update(job); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update job"})
+	if err := h.repo.Cancel(job.ID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

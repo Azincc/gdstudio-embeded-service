@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,13 +29,14 @@ const (
 
 // DownloadPayload 下载任务载荷
 type DownloadPayload struct {
-	JobID     string `json:"job_id"`
-	Source    string `json:"source"`
-	TrackID   string `json:"track_id"`
-	PicID     string `json:"pic_id,omitempty"`
-	LyricID   string `json:"lyric_id,omitempty"`
-	LibraryID string `json:"library_id"`
-	Quality   string `json:"quality"`
+	JobID      string `json:"job_id"`
+	Source     string `json:"source"`
+	TrackID    string `json:"track_id"`
+	PicID      string `json:"pic_id,omitempty"`
+	LyricID    string `json:"lyric_id,omitempty"`
+	LibraryID  string `json:"library_id"`
+	Quality    string `json:"quality"`
+	LeaseOwner string `json:"-"`
 }
 
 // DownloadTask 下载任务处理器
@@ -98,8 +100,11 @@ func (t *DownloadTask) ProcessDownloadPayload(ctx context.Context, payload *Down
 	}
 
 	for _, stage := range stages {
-		if err := t.repo.UpdateStatus(payload.JobID, stage.name, ""); err != nil {
-			t.logger.Error("failed to update status", zap.Error(err))
+		if err := ctx.Err(); err != nil {
+			return t.handleContextStop(payload, err)
+		}
+		if err := t.repo.UpdateStatus(payload.JobID, payload.LeaseOwner, stage.name, ""); err != nil {
+			return fmt.Errorf("failed to update status to %s: %w", stage.name, err)
 		}
 
 		// 执行阶段
@@ -109,16 +114,30 @@ func (t *DownloadTask) ProcessDownloadPayload(ctx context.Context, payload *Down
 				zap.String("job_id", payload.JobID),
 				zap.Error(err))
 
-			if markErr := t.repo.MarkFailed(payload.JobID, err); markErr != nil {
+			if t.shouldLeaveForRecovery(ctx, err) {
+				return fmt.Errorf("%s interrupted: %w", stage.name, err)
+			}
+
+			if markErr := t.repo.MarkFailed(payload.JobID, payload.LeaseOwner, err); markErr != nil &&
+				!errors.Is(markErr, repository.ErrJobCancelled) &&
+				!errors.Is(markErr, repository.ErrLeaseLost) {
 				t.logger.Error("failed to mark job as failed", zap.Error(markErr))
 			}
 
 			return fmt.Errorf("%s failed: %w", stage.name, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return t.handleContextStop(payload, err)
+		}
 	}
 
-	if err := t.repo.UpdateStatus(payload.JobID, model.JobStatusTagging, ""); err != nil {
-		if markErr := t.repo.MarkFailed(payload.JobID, err); markErr != nil {
+	if err := ctx.Err(); err != nil {
+		return t.handleContextStop(payload, err)
+	}
+	if err := t.repo.QueuePostProcess(payload.JobID, payload.LeaseOwner); err != nil {
+		if markErr := t.repo.MarkFailed(payload.JobID, payload.LeaseOwner, err); markErr != nil &&
+			!errors.Is(markErr, repository.ErrJobCancelled) &&
+			!errors.Is(markErr, repository.ErrLeaseLost) {
 			t.logger.Error("failed to mark job as failed", zap.Error(markErr))
 		}
 		return fmt.Errorf("failed to queue post-processing: %w", err)
@@ -146,8 +165,11 @@ func (t *DownloadTask) ProcessPostProcessPayload(ctx context.Context, payload *D
 	}
 
 	for _, stage := range stages {
-		if err := t.repo.UpdateStatus(payload.JobID, stage.name, ""); err != nil {
-			t.logger.Error("failed to update status", zap.Error(err))
+		if err := ctx.Err(); err != nil {
+			return t.handleContextStop(payload, err)
+		}
+		if err := t.repo.UpdateStatus(payload.JobID, payload.LeaseOwner, stage.name, ""); err != nil {
+			return fmt.Errorf("failed to update status to %s: %w", stage.name, err)
 		}
 
 		if err := stage.fn(ctx, payload); err != nil {
@@ -156,11 +178,20 @@ func (t *DownloadTask) ProcessPostProcessPayload(ctx context.Context, payload *D
 				zap.String("job_id", payload.JobID),
 				zap.Error(err))
 
-			if markErr := t.repo.MarkFailed(payload.JobID, err); markErr != nil {
+			if t.shouldLeaveForRecovery(ctx, err) {
+				return fmt.Errorf("%s interrupted: %w", stage.name, err)
+			}
+
+			if markErr := t.repo.MarkFailed(payload.JobID, payload.LeaseOwner, err); markErr != nil &&
+				!errors.Is(markErr, repository.ErrJobCancelled) &&
+				!errors.Is(markErr, repository.ErrLeaseLost) {
 				t.logger.Error("failed to mark job as failed", zap.Error(markErr))
 			}
 
 			return fmt.Errorf("%s failed: %w", stage.name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return t.handleContextStop(payload, err)
 		}
 	}
 
@@ -170,7 +201,7 @@ func (t *DownloadTask) ProcessPostProcessPayload(ctx context.Context, payload *D
 		return fmt.Errorf("failed to find job: %w", err)
 	}
 
-	if err := t.repo.MarkDone(payload.JobID, job.FilePath, job.FileSize); err != nil {
+	if err := t.repo.MarkDone(payload.JobID, payload.LeaseOwner, job.FilePath, job.FileSize); err != nil {
 		return fmt.Errorf("failed to mark job as done: %w", err)
 	}
 
@@ -222,13 +253,14 @@ func PayloadFromJob(job *model.Job) *DownloadPayload {
 	}
 
 	return &DownloadPayload{
-		JobID:     job.ID,
-		Source:    job.Source,
-		TrackID:   job.TrackID,
-		PicID:     picID,
-		LyricID:   lyricID,
-		LibraryID: job.LibraryID,
-		Quality:   job.Quality,
+		JobID:      job.ID,
+		Source:     job.Source,
+		TrackID:    job.TrackID,
+		PicID:      picID,
+		LyricID:    lyricID,
+		LibraryID:  job.LibraryID,
+		Quality:    job.Quality,
+		LeaseOwner: job.LeaseOwner,
 	}
 }
 
@@ -243,7 +275,7 @@ func (t *DownloadTask) stageResolve(ctx context.Context, payload *DownloadPayloa
 		lastErr   error
 	)
 	for idx, bitrate := range bitrates {
-		urlResult, lastErr = t.gdClient.ResolveURL(payload.Source, payload.TrackID, bitrate)
+		urlResult, lastErr = t.gdClient.ResolveURLContext(ctx, payload.Source, payload.TrackID, bitrate)
 		if lastErr == nil {
 			if idx > 0 {
 				t.logger.Warn("resolve url succeeded after bitrate fallback",
@@ -253,6 +285,9 @@ func (t *DownloadTask) stageResolve(ctx context.Context, payload *DownloadPayloa
 					zap.Int("selected_bitrate", bitrate))
 			}
 			break
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		// 非最后一次失败时才打印回退提示，避免日志噪音。
@@ -281,7 +316,7 @@ func (t *DownloadTask) stageResolve(ctx context.Context, payload *DownloadPayloa
 	// 存储 URL 到临时字段（可以扩展 model 或使用 message 字段）
 	job.Message = urlResult.URL
 
-	if err := t.repo.Update(job); err != nil {
+	if err := t.repo.UpdateLeased(job, payload.LeaseOwner); err != nil {
 		return fmt.Errorf("failed to update job: %w", err)
 	}
 
@@ -317,7 +352,7 @@ func (t *DownloadTask) stageDownload(ctx context.Context, payload *DownloadPaylo
 	tempFilePath := filepath.Join(workDir, "audio"+ext)
 
 	// 下载文件
-	if err := t.downloadFile(ctx, downloadURL, tempFilePath, job.ID); err != nil {
+	if err := t.downloadFile(ctx, downloadURL, tempFilePath, job.ID, payload.LeaseOwner); err != nil {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
 
@@ -328,7 +363,7 @@ func (t *DownloadTask) stageDownload(ctx context.Context, payload *DownloadPaylo
 		job.FileSize = fileInfo.Size()
 	}
 
-	if err := t.repo.Update(job); err != nil {
+	if err := t.repo.UpdateLeased(job, payload.LeaseOwner); err != nil {
 		return fmt.Errorf("failed to update job: %w", err)
 	}
 
@@ -436,8 +471,8 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		}
 		if resolvedCoverID != "" {
 			var resolvedCoverURL string
-			err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-				url, resolveErr := t.gdClient.ResolveCover(payload.Source, resolvedCoverID)
+			err := retryWithBackoffContext(ctx, auxMaxRetries, auxRetryBaseWait, func() error {
+				url, resolveErr := t.gdClient.ResolveCoverContext(ctx, payload.Source, resolvedCoverID)
 				if resolveErr != nil {
 					return resolveErr
 				}
@@ -451,8 +486,8 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 					zap.Error(err))
 			} else if resolvedCoverURL != "" {
 				coverURL = resolvedCoverURL
-				dlErr := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-					data, downloadErr := t.gdClient.DownloadCover(payload.Source, resolvedCoverURL)
+				dlErr := retryWithBackoffContext(ctx, auxMaxRetries, auxRetryBaseWait, func() error {
+					data, downloadErr := t.gdClient.DownloadCoverContext(ctx, payload.Source, resolvedCoverURL)
 					if downloadErr != nil {
 						return downloadErr
 					}
@@ -474,8 +509,8 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	var translation string
 	if lyricID != "" {
 		var lyricResult *gdstudio.LyricResult
-		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-			result, e := t.gdClient.ResolveLyrics(payload.Source, lyricID)
+		err := retryWithBackoffContext(ctx, auxMaxRetries, auxRetryBaseWait, func() error {
+			result, e := t.gdClient.ResolveLyricsContext(ctx, payload.Source, lyricID)
 			if e != nil {
 				return e
 			}
@@ -514,14 +549,16 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		Lyrics:      lyrics,
 		Translation: translation,
 	}
-	if err := t.repo.Update(job); err != nil {
-		t.logger.Warn("failed to persist enriched metadata", zap.Error(err))
+	if err := t.repo.UpdateLeased(job, payload.LeaseOwner); err != nil {
+		return fmt.Errorf("failed to persist enriched metadata: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// 写入标签
-	if err := t.tagger.WriteTags(job.FilePath, metadata); err != nil {
-		t.logger.Warn("failed to write tags", zap.Error(err))
-		// 非致命错误，继续
+	if err := t.writeRequiredTags(job.FilePath, metadata); err != nil {
+		return err
 	}
 
 	// 写入 .lrc 文件
@@ -531,6 +568,13 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		}
 	}
 
+	return nil
+}
+
+func (t *DownloadTask) writeRequiredTags(filePath string, metadata *model.TrackMetadata) error {
+	if err := t.tagger.WriteTags(filePath, metadata); err != nil {
+		return fmt.Errorf("failed to write tags: %w", err)
+	}
 	return nil
 }
 
@@ -574,6 +618,28 @@ func (t *DownloadTask) stageMoving(ctx context.Context, payload *DownloadPayload
 		return fmt.Errorf("failed to create target dir: %w", err)
 	}
 
+	// Worker 可能在文件移动成功、数据库更新前退出。恢复时如果源文件已不存在而
+	// 目标文件存在，则继续补齐 sidecar 和数据库状态，而不是把任务误判为失败。
+	if _, err := os.Stat(sourcePath); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat source file: %w", err)
+		}
+		if _, targetErr := os.Stat(targetPath); targetErr != nil {
+			return fmt.Errorf("source file missing and target file unavailable: %w", targetErr)
+		}
+		for _, ext := range []string{".lrc", ".nfo"} {
+			if err := t.moveSidecar(sourcePath, targetPath, ext); err != nil {
+				t.logger.Warn("failed to recover sidecar move", zap.String("ext", ext), zap.Error(err))
+			}
+		}
+		job.FilePath = targetPath
+		if err := t.repo.UpdateLeased(job, payload.LeaseOwner); err != nil {
+			return fmt.Errorf("failed to persist recovered target path: %w", err)
+		}
+		t.logger.Info("recovered previously moved file", zap.String("path", targetPath))
+		return nil
+	}
+
 	// 移动文件（同分区使用 rename，跨分区使用 copy）
 	if err := os.Rename(sourcePath, targetPath); err != nil {
 		// Fallback: copy then delete
@@ -592,7 +658,7 @@ func (t *DownloadTask) stageMoving(ctx context.Context, payload *DownloadPayload
 
 	// 更新文件路径
 	job.FilePath = targetPath
-	if err := t.repo.Update(job); err != nil {
+	if err := t.repo.UpdateLeased(job, payload.LeaseOwner); err != nil {
 		return fmt.Errorf("failed to update job: %w", err)
 	}
 
@@ -605,14 +671,14 @@ func (t *DownloadTask) stageScanning(ctx context.Context, payload *DownloadPaylo
 	t.logger.Info("triggering navidrome scan", zap.String("job_id", payload.JobID))
 
 	// 触发扫描
-	if err := t.naviClient.StartScan(); err != nil {
+	if err := t.naviClient.StartScanContext(ctx); err != nil {
 		t.logger.Warn("failed to start scan", zap.Error(err))
 		// 非致命错误
 		return nil
 	}
 
 	// 等待扫描完成（带超时）
-	if err := t.naviClient.WaitForScan(t.cfg.Worker.ScanTimeout); err != nil {
+	if err := t.naviClient.WaitForScanContext(ctx, t.cfg.Worker.ScanTimeout); err != nil {
 		t.logger.Warn("scan wait failed", zap.Error(err))
 		// 非致命错误
 	}
@@ -621,7 +687,7 @@ func (t *DownloadTask) stageScanning(ctx context.Context, payload *DownloadPaylo
 }
 
 // downloadFile 下载文件并报告进度
-func (t *DownloadTask) downloadFile(ctx context.Context, url, destPath, jobID string) error {
+func (t *DownloadTask) downloadFile(ctx context.Context, url, destPath, jobID, leaseOwner string) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
@@ -664,7 +730,9 @@ func (t *DownloadTask) downloadFile(ctx context.Context, url, destPath, jobID st
 				if totalBytes > 0 {
 					progress = int(float64(completedBytes) / float64(totalBytes) * 100)
 				}
-				t.repo.UpdateProgress(jobID, progress, completedBytes, totalBytes)
+				if updateErr := t.repo.UpdateProgress(jobID, leaseOwner, progress, completedBytes, totalBytes); updateErr != nil {
+					return updateErr
+				}
 				lastUpdate = time.Now()
 			}
 		}
@@ -678,6 +746,25 @@ func (t *DownloadTask) downloadFile(ctx context.Context, url, destPath, jobID st
 	}
 
 	return nil
+}
+
+func (t *DownloadTask) shouldLeaveForRecovery(ctx context.Context, err error) bool {
+	return errors.Is(err, repository.ErrJobCancelled) ||
+		errors.Is(err, repository.ErrLeaseLost) ||
+		errors.Is(ctx.Err(), context.Canceled)
+}
+
+func (t *DownloadTask) handleContextStop(payload *DownloadPayload, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		if markErr := t.repo.MarkFailed(payload.JobID, payload.LeaseOwner, err); markErr != nil &&
+			!errors.Is(markErr, repository.ErrJobCancelled) &&
+			!errors.Is(markErr, repository.ErrLeaseLost) {
+			t.logger.Warn("failed to mark timed out job as failed",
+				zap.String("job_id", payload.JobID),
+				zap.Error(markErr))
+		}
+	}
+	return err
 }
 
 // copyFile 跨文件系统复制文件
@@ -780,11 +867,20 @@ func (t *DownloadTask) getBitrateCandidates(quality string) []int {
 	return unique
 }
 
-// retryWithBackoff 通用重试函数，支持指数退避。
+// retryWithBackoffContext 通用重试函数，支持指数退避和取消。
 // skipRetry 可选回调：如果返回 true 则不再重试（如 404 not found）。
-func retryWithBackoff(maxRetries int, baseWait time.Duration, fn func() error, skipRetry func(error) bool) error {
+func retryWithBackoffContext(
+	ctx context.Context,
+	maxRetries int,
+	baseWait time.Duration,
+	fn func() error,
+	skipRetry func(error) bool,
+) error {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		lastErr = fn()
 		if lastErr == nil {
 			return nil
@@ -799,7 +895,15 @@ func retryWithBackoff(maxRetries int, baseWait time.Duration, fn func() error, s
 			if wait > auxMaxWait {
 				wait = auxMaxWait
 			}
-			time.Sleep(wait)
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return lastErr

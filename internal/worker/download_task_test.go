@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
+	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
 	"go.uber.org/zap"
 )
 
@@ -17,6 +19,22 @@ func TestResolveAlbumArtistFallsBackToFirstTrackArtist(t *testing.T) {
 	}
 	if source != model.AlbumArtistSourceFallbackFirstArtist {
 		t.Fatalf("expected fallback source, got %q", source)
+	}
+}
+
+func TestWriteRequiredTagsReturnsTaggerFailure(t *testing.T) {
+	task := &DownloadTask{
+		tagger: tagger.NewTagger(zap.NewNop()),
+	}
+	err := task.writeRequiredTags("missing-file.mp3", &model.TrackMetadata{
+		Title:  "Song",
+		Artist: "Artist",
+	})
+	if err == nil {
+		t.Fatal("expected tag write failure to be returned")
+	}
+	if !strings.Contains(err.Error(), "failed to write tags") {
+		t.Fatalf("unexpected tag write error: %v", err)
 	}
 }
 

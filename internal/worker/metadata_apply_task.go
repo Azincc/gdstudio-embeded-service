@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -55,18 +56,18 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 
 	filePath, err := metadatasvc.ResolveSongPath(t.cfg, job.SongPath)
 	if err != nil {
-		t.repo.MarkFailed(job.ID, err)
+		t.markFailed(job, err)
 		return err
 	}
 
 	var editable model.EditableMetadata
 	if err := json.Unmarshal([]byte(job.MetadataJSON), &editable); err != nil {
-		t.repo.MarkFailed(job.ID, err)
+		t.markFailed(job, err)
 		return fmt.Errorf("decode metadata json failed: %w", err)
 	}
 
-	if err := t.repo.UpdateStatus(job.ID, model.MetadataJobStatusResolvingCover, "resolving cover"); err != nil {
-		t.logger.Warn("update metadata job status failed", zap.Error(err))
+	if err := t.repo.UpdateStatus(job.ID, job.LeaseOwner, model.MetadataJobStatusResolvingCover, "resolving cover"); err != nil {
+		return fmt.Errorf("update metadata job status failed: %w", err)
 	}
 
 	var coverData []byte
@@ -81,13 +82,16 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 			coverData = data
 		}
 	}
-
-	if err := t.repo.UpdateStatus(job.ID, model.MetadataJobStatusResolvingLyrics, "resolving lyrics"); err != nil {
-		t.logger.Warn("update metadata job status failed", zap.Error(err))
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	if err := t.repo.UpdateStatus(job.ID, model.MetadataJobStatusTagging, "writing tags"); err != nil {
-		t.logger.Warn("update metadata job status failed", zap.Error(err))
+	if err := t.repo.UpdateStatus(job.ID, job.LeaseOwner, model.MetadataJobStatusResolvingLyrics, "resolving lyrics"); err != nil {
+		return fmt.Errorf("update metadata job status failed: %w", err)
+	}
+
+	if err := t.repo.UpdateStatus(job.ID, job.LeaseOwner, model.MetadataJobStatusTagging, "writing tags"); err != nil {
+		return fmt.Errorf("update metadata job status failed: %w", err)
 	}
 
 	trackMetadata := &model.TrackMetadata{
@@ -116,8 +120,11 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 		zap.Bool("has_lyrics", editable.Lyrics != ""))
 
 	if err := t.tagger.WriteTags(filePath, trackMetadata); err != nil {
-		t.repo.MarkFailed(job.ID, err)
+		t.markFailed(job, err)
 		return fmt.Errorf("write tags failed: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if editable.Lyrics != "" {
 		if err := t.tagger.WriteLyricFile(filePath, editable.Lyrics); err != nil {
@@ -129,24 +136,27 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 
 	scanMessage := "metadata updated"
 	if t.naviClient != nil {
-		if err := t.repo.UpdateStatus(job.ID, model.MetadataJobStatusScanning, "triggering scan"); err != nil {
-			t.logger.Warn("update metadata job status failed", zap.Error(err))
+		if err := t.repo.UpdateStatus(job.ID, job.LeaseOwner, model.MetadataJobStatusScanning, "triggering scan"); err != nil {
+			return fmt.Errorf("update metadata job status failed: %w", err)
 		}
 
-		if err := t.naviClient.StartScan(); err != nil {
+		if err := t.naviClient.StartScanContext(ctx); err != nil {
 			t.logger.Warn("navidrome scan start failed",
 				zap.String("job_id", job.ID),
 				zap.Error(err))
 			scanMessage = "metadata updated, scan trigger failed"
-		} else if err := t.naviClient.WaitForScan(t.cfg.Worker.ScanTimeout); err != nil {
+		} else if err := t.naviClient.WaitForScanContext(ctx, t.cfg.Worker.ScanTimeout); err != nil {
 			t.logger.Warn("navidrome scan wait failed",
 				zap.String("job_id", job.ID),
 				zap.Error(err))
 			scanMessage = "metadata updated, scan wait failed"
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	if err := t.repo.MarkDone(job.ID, filePath, scanMessage); err != nil {
+	if err := t.repo.MarkDone(job.ID, job.LeaseOwner, filePath, scanMessage); err != nil {
 		return fmt.Errorf("mark metadata job done failed: %w", err)
 	}
 	t.logger.Info("metadata apply job completed",
@@ -156,4 +166,15 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 		zap.String("message", scanMessage),
 		zap.Duration("elapsed", time.Since(startedAt)))
 	return nil
+}
+
+func (t *MetadataApplyTask) markFailed(job *model.MetadataJob, err error) {
+	if job == nil || err == nil || errors.Is(err, context.Canceled) || errors.Is(err, repository.ErrLeaseLost) {
+		return
+	}
+	if markErr := t.repo.MarkFailed(job.ID, job.LeaseOwner, err); markErr != nil && !errors.Is(markErr, repository.ErrLeaseLost) {
+		t.logger.Warn("mark metadata job failed failed",
+			zap.String("job_id", job.ID),
+			zap.Error(markErr))
+	}
 }

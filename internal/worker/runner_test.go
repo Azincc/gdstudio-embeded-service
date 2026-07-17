@@ -11,12 +11,13 @@ import (
 )
 
 type fakeRunnerRepo struct {
-	mu    sync.Mutex
-	queue []*model.Job
-	post  []*model.Job
+	mu        sync.Mutex
+	queue     []*model.Job
+	post      []*model.Job
+	cancelled bool
 }
 
-func (r *fakeRunnerRepo) ClaimNextQueued() (*model.Job, error) {
+func (r *fakeRunnerRepo) ClaimNextQueued(owner string, _ time.Duration) (*model.Job, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -25,10 +26,11 @@ func (r *fakeRunnerRepo) ClaimNextQueued() (*model.Job, error) {
 	}
 	job := r.queue[0]
 	r.queue = r.queue[1:]
+	job.LeaseOwner = owner
 	return job, nil
 }
 
-func (r *fakeRunnerRepo) FindNextByStatuses(statuses []string) (*model.Job, error) {
+func (r *fakeRunnerRepo) ClaimNextPostProcess(owner string, _ time.Duration, statuses []string) (*model.Job, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -39,10 +41,27 @@ func (r *fakeRunnerRepo) FindNextByStatuses(statuses []string) (*model.Job, erro
 	for _, status := range statuses {
 		if job.Status == status {
 			r.post = r.post[1:]
+			job.LeaseOwner = owner
 			return job, nil
 		}
 	}
 	return nil, nil
+}
+
+func (r *fakeRunnerRepo) RenewLease(string, string, time.Duration) error { return nil }
+
+func (r *fakeRunnerRepo) ReleaseLease(string, string) error { return nil }
+
+func (r *fakeRunnerRepo) IsCancelled(string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelled, nil
+}
+
+func (r *fakeRunnerRepo) cancelActiveJob() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancelled = true
 }
 
 func (r *fakeRunnerRepo) enqueuePost(job *model.Job) {
@@ -144,5 +163,39 @@ func TestRunnerPostProcessingDoesNotBlockDownloads(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner did not stop in time")
+	}
+}
+
+func TestRunLeasedCancelsActiveTaskWhenRepositoryIsCancelled(t *testing.T) {
+	repo := &fakeRunnerRepo{}
+	runner := &Runner{
+		repo:   repo,
+		logger: zap.NewNop(),
+	}
+	started := make(chan struct{})
+	finished := make(chan error, 1)
+
+	go func() {
+		finished <- runner.runLeased(context.Background(), "job-cancel", "owner", func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("task did not start")
+	}
+	repo.cancelActiveJob()
+
+	select {
+	case err := <-finished:
+		if err != context.Canceled {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active task was not cancelled in time")
 	}
 }

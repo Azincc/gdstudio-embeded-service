@@ -1,6 +1,7 @@
 package navidrome
 
 import (
+	"context"
 	"crypto/md5"
 	"fmt"
 	"strings"
@@ -23,7 +24,7 @@ type Client struct {
 // NewClient 创建客户端
 func NewClient(cfg *config.NavidromeConfig, logger *zap.Logger) *Client {
 	client := resty.New().
-		SetTimeout(30 * time.Second).
+		SetTimeout(30*time.Second).
 		SetHeader("User-Agent", "echo-embed/1.0")
 
 	// 生成 token 和 salt
@@ -47,6 +48,11 @@ type ScanStatus struct {
 
 // StartScan 触发扫描
 func (c *Client) StartScan() error {
+	return c.StartScanContext(context.Background())
+}
+
+// StartScanContext 触发扫描，并支持取消请求。
+func (c *Client) StartScanContext(ctx context.Context) error {
 	c.logger.Info("starting navidrome scan")
 
 	var result struct {
@@ -57,6 +63,7 @@ func (c *Client) StartScan() error {
 	}
 
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(c.authParams()).
 		SetResult(&result).
 		Get(c.cfg.BaseURL + "/rest/startScan")
@@ -79,6 +86,11 @@ func (c *Client) StartScan() error {
 
 // GetScanStatus 查询扫描状态
 func (c *Client) GetScanStatus() (*ScanStatus, error) {
+	return c.GetScanStatusContext(context.Background())
+}
+
+// GetScanStatusContext 查询扫描状态，并支持取消请求。
+func (c *Client) GetScanStatusContext(ctx context.Context) (*ScanStatus, error) {
 	c.logger.Debug("getting scan status")
 
 	var result struct {
@@ -89,6 +101,7 @@ func (c *Client) GetScanStatus() (*ScanStatus, error) {
 	}
 
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(c.authParams()).
 		SetResult(&result).
 		Get(c.cfg.BaseURL + "/rest/getScanStatus")
@@ -114,18 +127,26 @@ func (c *Client) GetScanStatus() (*ScanStatus, error) {
 
 // WaitForScan 等待扫描完成
 func (c *Client) WaitForScan(timeout time.Duration) error {
+	return c.WaitForScanContext(context.Background(), timeout)
+}
+
+// WaitForScanContext 等待扫描完成，并支持取消。
+func (c *Client) WaitForScanContext(ctx context.Context, timeout time.Duration) error {
 	c.logger.Info("waiting for scan to complete", zap.Duration("timeout", timeout))
 
-	deadline := time.Now().Add(timeout)
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-time.After(time.Until(deadline)):
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeoutTimer.C:
 			return fmt.Errorf("scan timeout after %v", timeout)
 		case <-ticker.C:
-			status, err := c.GetScanStatus()
+			status, err := c.GetScanStatusContext(ctx)
 			if err != nil {
 				c.logger.Warn("failed to get scan status", zap.Error(err))
 				continue

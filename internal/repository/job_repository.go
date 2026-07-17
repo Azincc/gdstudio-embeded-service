@@ -49,14 +49,102 @@ func (r *JobRepository) FindByIdempotencyKey(key string) (*model.Job, error) {
 	return &job, nil
 }
 
-// Update 更新任务
-func (r *JobRepository) Update(job *model.Job) error {
-	job.UpdatedAt = time.Now()
-	return r.db.Save(job).Error
+// UpdateLeased 更新任务业务字段，但不会覆盖状态和租约。
+func (r *JobRepository) UpdateLeased(job *model.Job, leaseOwner string) error {
+	updates := map[string]interface{}{
+		"pic_id":              job.PicID,
+		"lyric_id":            job.LyricID,
+		"quality":             job.Quality,
+		"title":               job.Title,
+		"artist":              job.Artist,
+		"album_artist":        job.AlbumArtist,
+		"album_artist_source": job.AlbumArtistSource,
+		"album":               job.Album,
+		"track_number":        job.TrackNumber,
+		"year":                job.Year,
+		"message":             job.Message,
+		"progress":            job.Progress,
+		"total_bytes":         job.TotalBytes,
+		"completed_bytes":     job.CompletedBytes,
+		"file_path":           job.FilePath,
+		"file_size":           job.FileSize,
+		"duration":            job.Duration,
+		"bitrate":             job.Bitrate,
+		"updated_at":          time.Now(),
+	}
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", job.ID, leaseOwner, model.JobStatusCancelled).
+		Updates(updates)
+	return r.leasedUpdateError(result, job.ID)
 }
 
-// UpdateStatus 更新任务状态
-func (r *JobRepository) UpdateStatus(id, status, message string) error {
+// Touch 刷新任务时间戳，不改变创建时间或队列顺序。
+func (r *JobRepository) Touch(id string) error {
+	return r.db.Model(&model.Job{}).
+		Where("id = ?", id).
+		Update("updated_at", time.Now()).Error
+}
+
+// ResetForRetry 把失败任务重新放回队列。
+func (r *JobRepository) ResetForRetry(id string) error {
+	now := time.Now()
+	return r.db.Model(&model.Job{}).
+		Where("id = ? AND status = ?", id, model.JobStatusFailed).
+		Updates(map[string]interface{}{
+			"status":           model.JobStatusQueued,
+			"error":            "",
+			"message":          "retrying",
+			"progress":         0,
+			"completed_bytes":  0,
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       now,
+		}).Error
+}
+
+// Cancel 将非终态任务原子标记为取消，并立即撤销其租约。
+func (r *JobRepository) Cancel(id string) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND status NOT IN ?", id, []string{
+			model.JobStatusDone,
+			model.JobStatusFailed,
+			model.JobStatusCancelled,
+		}).
+		Updates(map[string]interface{}{
+			"status":           model.JobStatusCancelled,
+			"message":          "cancelled by user",
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
+
+	job, err := r.FindByID(id)
+	if err != nil {
+		return err
+	}
+	if job.Status == model.JobStatusCancelled {
+		return nil
+	}
+	return fmt.Errorf("cannot cancel job in status %s", job.Status)
+}
+
+// IsCancelled 查询任务是否已经被用户取消。
+func (r *JobRepository) IsCancelled(id string) (bool, error) {
+	var job model.Job
+	if err := r.db.Select("status").Where("id = ?", id).First(&job).Error; err != nil {
+		return false, err
+	}
+	return job.Status == model.JobStatusCancelled, nil
+}
+
+// UpdateStatus 更新租约持有者所处理任务的状态。
+func (r *JobRepository) UpdateStatus(id, leaseOwner, status, message string) error {
 	updates := map[string]interface{}{
 		"status":     status,
 		"updated_at": time.Now(),
@@ -65,45 +153,53 @@ func (r *JobRepository) UpdateStatus(id, status, message string) error {
 		updates["message"] = message
 	}
 
-	return r.db.Model(&model.Job{}).
-		Where("id = ?", id).
-		Updates(updates).Error
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", id, leaseOwner, model.JobStatusCancelled).
+		Updates(updates)
+	return r.leasedUpdateError(result, id)
 }
 
 // UpdateProgress 更新任务进度
-func (r *JobRepository) UpdateProgress(id string, progress int, completedBytes, totalBytes int64) error {
-	return r.db.Model(&model.Job{}).
-		Where("id = ?", id).
+func (r *JobRepository) UpdateProgress(id, leaseOwner string, progress int, completedBytes, totalBytes int64) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", id, leaseOwner, model.JobStatusCancelled).
 		Updates(map[string]interface{}{
 			"progress":        progress,
 			"completed_bytes": completedBytes,
 			"total_bytes":     totalBytes,
 			"updated_at":      time.Now(),
-		}).Error
+		})
+	return r.leasedUpdateError(result, id)
 }
 
 // MarkFailed 标记任务失败
-func (r *JobRepository) MarkFailed(id string, err error) error {
-	return r.db.Model(&model.Job{}).
-		Where("id = ?", id).
+func (r *JobRepository) MarkFailed(id, leaseOwner string, err error) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", id, leaseOwner, model.JobStatusCancelled).
 		Updates(map[string]interface{}{
-			"status":     model.JobStatusFailed,
-			"error":      err.Error(),
-			"updated_at": time.Now(),
-		}).Error
+			"status":           model.JobStatusFailed,
+			"error":            err.Error(),
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       time.Now(),
+		})
+	return r.leasedUpdateError(result, id)
 }
 
 // MarkDone 标记任务完成
-func (r *JobRepository) MarkDone(id, filePath string, fileSize int64) error {
-	return r.db.Model(&model.Job{}).
-		Where("id = ?", id).
+func (r *JobRepository) MarkDone(id, leaseOwner, filePath string, fileSize int64) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", id, leaseOwner, model.JobStatusCancelled).
 		Updates(map[string]interface{}{
-			"status":     model.JobStatusDone,
-			"file_path":  filePath,
-			"file_size":  fileSize,
-			"progress":   100,
-			"updated_at": time.Now(),
-		}).Error
+			"status":           model.JobStatusDone,
+			"file_path":        filePath,
+			"file_size":        fileSize,
+			"progress":         100,
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       time.Now(),
+		})
+	return r.leasedUpdateError(result, id)
 }
 
 // ListByStatus 根据状态查询任务列表
@@ -116,25 +212,64 @@ func (r *JobRepository) ListByStatus(status string, limit int) ([]*model.Job, er
 	return jobs, err
 }
 
-// FindNextByStatuses 查询最早创建的一条指定状态任务。
-func (r *JobRepository) FindNextByStatuses(statuses []string) (*model.Job, error) {
+// ClaimNextPostProcess 原子领取一条可处理或租约已过期的后处理任务。
+func (r *JobRepository) ClaimNextPostProcess(owner string, leaseDuration time.Duration, statuses []string) (*model.Job, error) {
 	if len(statuses) == 0 {
 		return nil, nil
 	}
 
-	var job model.Job
-	result := r.db.Where("status IN ?", statuses).
-		Order("created_at ASC").
-		Limit(1).
-		Find(&job)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
+	var claimed *model.Job
+	now := time.Now()
+	expiresAt := now.Add(leaseDuration)
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var job model.Job
+		result := tx.Where(
+			"status IN ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+			statuses,
+			now,
+		).
+			Order("created_at ASC").
+			Limit(1).
+			Find(&job)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+
+		updateResult := tx.Model(&model.Job{}).
+			Where(
+				"id = ? AND status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+				job.ID,
+				job.Status,
+				now,
+			).
+			Updates(map[string]interface{}{
+				"lease_owner":      owner,
+				"lease_expires_at": expiresAt,
+				"updated_at":       now,
+			})
+		if updateResult.Error != nil {
+			return updateResult.Error
+		}
+		if updateResult.RowsAffected == 0 {
+			return errJobAlreadyClaimed
+		}
+
+		job.LeaseOwner = owner
+		job.LeaseExpiresAt = &expiresAt
+		job.UpdatedAt = now
+		claimed = &job
+		return nil
+	})
+	if errors.Is(err, errJobAlreadyClaimed) {
 		return nil, nil
 	}
-
-	return &job, nil
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
 }
 
 // ListRecent 查询最近的任务
@@ -165,13 +300,21 @@ func (r *JobRepository) CountByStatus(status string) (int64, error) {
 	return count, err
 }
 
-// ClaimNextQueued 原子领取一条最老的排队任务。
-func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
+// ClaimNextQueued 原子领取一条最老的排队任务，或恢复租约已过期的下载任务。
+func (r *JobRepository) ClaimNextQueued(owner string, leaseDuration time.Duration) (*model.Job, error) {
 	var claimed *model.Job
+	now := time.Now()
+	expiresAt := now.Add(leaseDuration)
+	recoverableStatuses := []string{model.JobStatusResolving, model.JobStatusDownloading}
 
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var job model.Job
-		result := tx.Where("status = ?", model.JobStatusQueued).
+		result := tx.Where(
+			"status = ? OR (status IN ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?))",
+			model.JobStatusQueued,
+			recoverableStatuses,
+			now,
+		).
 			Order("created_at ASC").
 			Limit(1).
 			Find(&job)
@@ -182,13 +325,23 @@ func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
 			return nil
 		}
 
-		now := time.Now()
 		updateResult := tx.Model(&model.Job{}).
-			Where("id = ? AND status = ?", job.ID, model.JobStatusQueued).
+			Where(
+				"id = ? AND (status = ? OR (status IN ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))",
+				job.ID,
+				model.JobStatusQueued,
+				recoverableStatuses,
+				now,
+			).
 			Updates(map[string]interface{}{
-				"status":     model.JobStatusResolving,
-				"message":    "",
-				"updated_at": now,
+				"status":           model.JobStatusResolving,
+				"message":          "",
+				"error":            "",
+				"progress":         0,
+				"completed_bytes":  0,
+				"lease_owner":      owner,
+				"lease_expires_at": expiresAt,
+				"updated_at":       now,
 			})
 		if updateResult.Error != nil {
 			return updateResult.Error
@@ -199,6 +352,11 @@ func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
 
 		job.Status = model.JobStatusResolving
 		job.Message = ""
+		job.Error = ""
+		job.Progress = 0
+		job.CompletedBytes = 0
+		job.LeaseOwner = owner
+		job.LeaseExpiresAt = &expiresAt
 		job.UpdatedAt = now
 		claimed = &job
 		return nil
@@ -211,6 +369,59 @@ func (r *JobRepository) ClaimNextQueued() (*model.Job, error) {
 	}
 
 	return claimed, nil
+}
+
+// QueuePostProcess 把下载完成的任务交给独立后处理循环，并释放当前租约。
+func (r *JobRepository) QueuePostProcess(id, leaseOwner string) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status <> ?", id, leaseOwner, model.JobStatusCancelled).
+		Updates(map[string]interface{}{
+			"status":           model.JobStatusTagging,
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       time.Now(),
+		})
+	return r.leasedUpdateError(result, id)
+}
+
+// RenewLease 延长任务租约。
+func (r *JobRepository) RenewLease(id, leaseOwner string, leaseDuration time.Duration) error {
+	result := r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ? AND status NOT IN ?", id, leaseOwner, []string{
+			model.JobStatusDone,
+			model.JobStatusFailed,
+			model.JobStatusCancelled,
+		}).
+		Update("lease_expires_at", time.Now().Add(leaseDuration))
+	return r.leasedUpdateError(result, id)
+}
+
+// ReleaseLease 主动释放租约，让其他 Worker 可以立即恢复任务。
+func (r *JobRepository) ReleaseLease(id, leaseOwner string) error {
+	return r.db.Model(&model.Job{}).
+		Where("id = ? AND lease_owner = ?", id, leaseOwner).
+		Updates(map[string]interface{}{
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+		}).Error
+}
+
+func (r *JobRepository) leasedUpdateError(result *gorm.DB, id string) error {
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
+
+	job, err := r.FindByID(id)
+	if err != nil {
+		return err
+	}
+	if job.Status == model.JobStatusCancelled {
+		return ErrJobCancelled
+	}
+	return ErrLeaseLost
 }
 
 // Delete 永久删除任务（用于 force 重新下载时清除幂等记录）
