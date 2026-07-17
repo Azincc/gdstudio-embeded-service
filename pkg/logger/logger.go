@@ -48,7 +48,7 @@ func Init(level, format, output, filePath string) error {
 	}
 
 	core := zapcore.NewCore(encoder, writeSyncer, zapLevel)
-	globalLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	globalLogger = zap.New(core, zap.AddCaller())
 
 	return nil
 }
@@ -64,27 +64,27 @@ func Get() *zap.Logger {
 
 // Debug 调试日志
 func Debug(msg string, fields ...zap.Field) {
-	Get().Debug(msg, fields...)
+	Get().WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 }
 
 // Info 信息日志
 func Info(msg string, fields ...zap.Field) {
-	Get().Info(msg, fields...)
+	Get().WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 }
 
 // Warn 警告日志
 func Warn(msg string, fields ...zap.Field) {
-	Get().Warn(msg, fields...)
+	Get().WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 }
 
 // Error 错误日志
 func Error(msg string, fields ...zap.Field) {
-	Get().Error(msg, fields...)
+	Get().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 }
 
 // Fatal 致命错误日志
 func Fatal(msg string, fields ...zap.Field) {
-	Get().Fatal(msg, fields...)
+	Get().WithOptions(zap.AddCallerSkip(1)).Fatal(msg, fields...)
 }
 
 // Sync 同步日志缓冲
