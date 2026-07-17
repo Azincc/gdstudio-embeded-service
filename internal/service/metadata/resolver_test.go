@@ -137,3 +137,54 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveCandidatesTreatsNoMatchAsSuccessfulEmptyResult(t *testing.T) {
+	musicDir := t.TempDir()
+	audioPath := filepath.Join(musicDir, "song.ogg")
+	if err := os.WriteFile(audioPath, []byte("stub"), 0600); err != nil {
+		t.Fatalf("write temp audio file failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	logCore, observedLogs := observer.New(zap.InfoLevel)
+	logger := zap.New(logCore)
+	gdClient := gdstudio.NewClient(&config.GDStudioConfig{
+		BaseURL: server.URL,
+		Timeout: time.Second,
+	}, logger)
+	resolver := NewResolver(
+		&config.Config{Storage: config.StorageConfig{MusicDir: musicDir}},
+		gdClient,
+		logger,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	response, _, err := resolver.ResolveCandidates(
+		ctx,
+		model.SongMetadataReference{
+			ID:     "song-no-match",
+			Path:   "song.ogg",
+			Title:  "Missing Song",
+			Artist: "Missing Artist",
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected no-match lookup to succeed, got %v", err)
+	}
+	if response == nil || len(response.Candidates) != 0 {
+		t.Fatalf("expected empty candidates, got %#v", response)
+	}
+	if got := observedLogs.FilterMessage("metadata candidate source completed without match").Len(); got != 2 {
+		t.Fatalf("expected two no-match completion logs, got %d", got)
+	}
+	if got := observedLogs.FilterMessage("metadata candidate source attempt failed").Len(); got != 0 {
+		t.Fatalf("expected no warning attempts for no-match results, got %d", got)
+	}
+}

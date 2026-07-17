@@ -154,6 +154,7 @@ func (r *Resolver) ResolveCandidates(
 		go func() {
 			sourceStartedAt := time.Now()
 			attempts := 0
+			notFound := false
 			var resolved *gdstudio.MetadataResult
 			r.logger.Info("metadata candidate source lookup started",
 				zap.String("song_id", song.ID),
@@ -172,6 +173,10 @@ func (r *Resolver) ResolveCandidates(
 					lookupArtist,
 				)
 				if lookupErr != nil {
+					if errors.Is(lookupErr, gdstudio.ErrMetadataNotFound) {
+						notFound = true
+						return nil
+					}
 					r.logger.Warn("metadata candidate source attempt failed",
 						zap.String("song_id", song.ID),
 						zap.String("source", source),
@@ -181,14 +186,8 @@ func (r *Resolver) ResolveCandidates(
 					return lookupErr
 				}
 				if gdMeta == nil {
-					emptyErr := fmt.Errorf("gdmusic returned empty metadata")
-					r.logger.Warn("metadata candidate source attempt failed",
-						zap.String("song_id", song.ID),
-						zap.String("source", source),
-						zap.Int("attempt", attempts),
-						zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
-						zap.Error(emptyErr))
-					return emptyErr
+					notFound = true
+					return nil
 				}
 				resolved = gdMeta
 				return nil
@@ -200,6 +199,12 @@ func (r *Resolver) ResolveCandidates(
 					zap.Int("attempts", attempts),
 					zap.Duration("elapsed", time.Since(sourceStartedAt)),
 					zap.Error(err))
+			} else if notFound {
+				r.logger.Info("metadata candidate source completed without match",
+					zap.String("song_id", song.ID),
+					zap.String("source", source),
+					zap.Int("attempts", attempts),
+					zap.Duration("elapsed", time.Since(sourceStartedAt)))
 			} else {
 				r.logger.Info("metadata candidate source lookup succeeded",
 					zap.String("song_id", song.ID),
@@ -238,6 +243,9 @@ func (r *Resolver) ResolveCandidates(
 
 	for _, source := range candidateSources {
 		gdMeta := resolvedBySource[source]
+		if gdMeta == nil {
+			continue
+		}
 		editable := model.EditableMetadata{
 			Title:       firstNonEmpty(gdMeta.Title, lookupTitle),
 			Artist:      firstNonEmpty(gdMeta.Artist, lookupArtist),

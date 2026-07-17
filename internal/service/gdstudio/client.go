@@ -3,6 +3,7 @@ package gdstudio
 import (
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -14,6 +15,9 @@ import (
 	"github.com/go-resty/resty/v2"
 	"go.uber.org/zap"
 )
+
+// ErrMetadataNotFound 表示查询正常完成，但没有找到可信的曲目匹配。
+var ErrMetadataNotFound = errors.New("metadata not found from search")
 
 // Client GDStudio API 客户端
 type Client struct {
@@ -109,7 +113,7 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("metadata not found from search")
+	return nil, ErrMetadataNotFound
 }
 
 // ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
