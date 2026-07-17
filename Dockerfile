@@ -32,9 +32,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # 运行阶段 - 使用最小化镜像
 FROM alpine:latest
 
-# 安装运行时依赖
-# flac 包提供 metaflac，chromaprint 提供 fpcalc 用于生成音频指纹
-RUN apk add --no-cache ca-certificates tzdata flac chromaprint && \
+# 安装运行时依赖；flac 包提供 metaflac。
+RUN apk add --no-cache ca-certificates tzdata flac && \
     addgroup -g 1000 appuser && \
     adduser -D -u 1000 -G appuser appuser
 

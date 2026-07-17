@@ -4,34 +4,14 @@ import (
 	"testing"
 
 	"github.com/azin/gdstudio-embed-service/internal/model"
-	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
+	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
 	"go.uber.org/zap"
 )
-
-func TestChooseAlbumArtistPrefersReliableCurrentValue(t *testing.T) {
-	albumArtist, source, ok := chooseAlbumArtist("Artist A", model.AlbumArtistSourceFingerprint, "Artist B")
-	if !ok {
-		t.Fatal("expected reliable album artist to be selected")
-	}
-	if albumArtist != "Artist A" || source != model.AlbumArtistSourceFingerprint {
-		t.Fatalf("expected current reliable value, got artist=%q source=%q", albumArtist, source)
-	}
-}
-
-func TestChooseAlbumArtistReusesSharedValueWhenCurrentIsWeak(t *testing.T) {
-	albumArtist, source, ok := chooseAlbumArtist("Artist B", model.AlbumArtistSourceFallbackFirstArtist, "Artist A")
-	if !ok {
-		t.Fatal("expected shared album artist to be selected")
-	}
-	if albumArtist != "Artist A" || source != model.AlbumArtistSourceAlbumShared {
-		t.Fatalf("expected shared album artist, got artist=%q source=%q", albumArtist, source)
-	}
-}
 
 func TestResolveAlbumArtistFallsBackToFirstTrackArtist(t *testing.T) {
 	task := &DownloadTask{logger: zap.NewNop()}
 
-	albumArtist, source := task.resolveAlbumArtist("Track 3", "Artist B / Artist C", "Same Album")
+	albumArtist, source := task.resolveAlbumArtist("Artist B / Artist C")
 	if albumArtist != "Artist B" {
 		t.Fatalf("expected first artist fallback, got %q", albumArtist)
 	}
@@ -40,50 +20,58 @@ func TestResolveAlbumArtistFallsBackToFirstTrackArtist(t *testing.T) {
 	}
 }
 
-func TestApplyFingerprintMetadataPreservesAlbumArtistSource(t *testing.T) {
-	job := &model.Job{}
-	metadata := &musicbrainz.FingerprintMetadata{
-		AlbumArtist:       "Artist A / Artist B",
-		AlbumArtistSource: model.AlbumArtistSourceFingerprint,
-	}
+func TestResolveAlbumArtistKeepsSingleTrackArtist(t *testing.T) {
+	task := &DownloadTask{logger: zap.NewNop()}
 
-	applyFingerprintMetadata(job, metadata)
-	if job.AlbumArtist != "Artist A / Artist B" {
-		t.Fatalf("expected album artist to be applied, got %q", job.AlbumArtist)
+	albumArtist, source := task.resolveAlbumArtist("Artist A")
+	if albumArtist != "Artist A" {
+		t.Fatalf("expected single artist to be preserved, got %q", albumArtist)
 	}
-	if job.AlbumArtistSource != model.AlbumArtistSourceFingerprint {
-		t.Fatalf("expected fingerprint source, got %q", job.AlbumArtistSource)
+	if source != model.AlbumArtistSourceFallbackArtist {
+		t.Fatalf("expected single artist fallback source, got %q", source)
 	}
 }
 
-func TestApplyFingerprintMetadataPrefersMusicBrainzTrackTitleAndArtist(t *testing.T) {
+func TestApplyGDMetadataOverridesExistingTrackMetadata(t *testing.T) {
 	job := &model.Job{
-		Title:  "决行 〜姫をさがして：黄金〜",
-		Artist: "植松伸夫 / 矢崎早彩",
+		Title:       "Source Title",
+		Artist:      "Source Artist",
+		Album:       "Source Album",
+		TrackNumber: 2,
+		Year:        2024,
 	}
-	metadata := &musicbrainz.FingerprintMetadata{
-		Title:             "決行～姫をさがして:黄金～",
-		Artist:            "祖堅正慶",
-		AlbumArtist:       "祖堅正慶",
-		AlbumArtistSource: model.AlbumArtistSourceMusicBrainz,
-		TrackNumber:       5,
-		Year:              2025,
+	metadata := &gdstudio.MetadataResult{
+		Title:       "Resolved Title",
+		Artist:      "Resolved Artist",
+		Album:       "Resolved Album",
+		TrackNumber: 8,
+		Year:        2025,
 	}
 
-	applyFingerprintMetadata(job, metadata)
-	if job.Title != "決行～姫をさがして:黄金～" {
-		t.Fatalf("expected musicbrainz title to override source value, got %q", job.Title)
+	applyGDMetadata(job, metadata)
+	if job.Title != metadata.Title || job.Artist != metadata.Artist || job.Album != metadata.Album {
+		t.Fatalf("expected gdmusic text metadata to override existing values, got %+v", job)
 	}
-	if job.Artist != "祖堅正慶" {
-		t.Fatalf("expected musicbrainz artist to override source value, got %q", job.Artist)
+	if job.TrackNumber != metadata.TrackNumber || job.Year != metadata.Year {
+		t.Fatalf("expected gdmusic numeric metadata to override existing values, got track=%d year=%d", job.TrackNumber, job.Year)
 	}
-	if job.AlbumArtist != "祖堅正慶" {
-		t.Fatalf("expected album artist to be updated, got %q", job.AlbumArtist)
+}
+
+func TestApplyGDMetadataFillsMissingTrackMetadata(t *testing.T) {
+	job := &model.Job{}
+	metadata := &gdstudio.MetadataResult{
+		Title:       "Resolved Title",
+		Artist:      "Resolved Artist",
+		Album:       "Resolved Album",
+		TrackNumber: 8,
+		Year:        2025,
 	}
-	if job.AlbumArtistSource != model.AlbumArtistSourceMusicBrainz {
-		t.Fatalf("expected musicbrainz album artist source, got %q", job.AlbumArtistSource)
+
+	applyGDMetadata(job, metadata)
+	if job.Title != metadata.Title || job.Artist != metadata.Artist || job.Album != metadata.Album {
+		t.Fatalf("expected missing text metadata to be filled, got %+v", job)
 	}
-	if job.TrackNumber != 5 || job.Year != 2025 {
-		t.Fatalf("expected track number/year to be updated, got track=%d year=%d", job.TrackNumber, job.Year)
+	if job.TrackNumber != metadata.TrackNumber || job.Year != metadata.Year {
+		t.Fatalf("expected missing numeric metadata to be filled, got track=%d year=%d", job.TrackNumber, job.Year)
 	}
 }

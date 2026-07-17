@@ -13,7 +13,6 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
 	"github.com/azin/gdstudio-embed-service/internal/service/metadata"
-	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
 	"github.com/azin/gdstudio-embed-service/internal/worker"
@@ -22,7 +21,7 @@ import (
 )
 
 var (
-	Version   = "0.2.9"
+	Version   = "0.2.10"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -76,22 +75,12 @@ func main() {
 		log.Fatal("failed to create work dir", zap.Error(err))
 	}
 
-	var mbClient *musicbrainz.Client
-	if cfg.MusicBrainz.Enabled {
-		mbClient = musicbrainz.NewClient(&cfg.MusicBrainz, log)
-		log.Info("musicbrainz client enabled",
-			zap.String("base_url", cfg.MusicBrainz.BaseURL))
-	} else {
-		log.Info("musicbrainz client disabled, album artist will use fallback")
-	}
-
 	downloadTask := worker.NewDownloadTask(
 		cfg,
 		jobRepo,
 		gdClient,
 		naviClient,
 		taggerService,
-		mbClient,
 		log,
 	)
 	runner := worker.NewRunner(
@@ -101,7 +90,7 @@ func main() {
 		cfg.Worker.MaxConcurrent,
 		cfg.Worker.PollInterval,
 	)
-	metadataResolver := metadata.NewResolver(cfg, gdClient, mbClient, log)
+	metadataResolver := metadata.NewResolver(cfg, gdClient, log)
 	metadataTask := worker.NewMetadataApplyTask(
 		cfg,
 		metadataJobRepo,

@@ -14,13 +14,12 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
 	"github.com/azin/gdstudio-embed-service/internal/service/metadata"
-	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/pkg/logger"
 	"go.uber.org/zap"
 )
 
 var (
-	Version   = "0.2.9"
+	Version   = "0.2.10"
 	CommitSHA = "unknown"
 	BuildDate = "unknown"
 )
@@ -68,11 +67,7 @@ func main() {
 	metadataCandidatesJobRepo := repository.NewMetadataCandidatesJobRepository(db)
 
 	gdClient := gdstudio.NewClient(&cfg.GDStudio, log)
-	var mbClient *musicbrainz.Client
-	if cfg.MusicBrainz.Enabled {
-		mbClient = musicbrainz.NewClient(&cfg.MusicBrainz, log)
-	}
-	metadataResolver := metadata.NewResolver(cfg, gdClient, mbClient, log)
+	metadataResolver := metadata.NewResolver(cfg, gdClient, log)
 
 	// 初始化 Handler
 	jobHandler := handlers.NewJobHandler(cfg, jobRepo, log, Version)

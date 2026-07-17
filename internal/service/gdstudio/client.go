@@ -1,6 +1,7 @@
 package gdstudio
 
 import (
+	"context"
 	"crypto/md5"
 	"fmt"
 	"net/url"
@@ -67,6 +68,11 @@ type MetadataResult struct {
 
 // ResolveMetadata 通过搜索结果反查曲目元数据、pic_id、lyric_id。
 func (c *Client) ResolveMetadata(source, trackID, title, artist string) (*MetadataResult, error) {
+	return c.ResolveMetadataContext(context.Background(), source, trackID, title, artist)
+}
+
+// ResolveMetadataContext 通过搜索结果反查曲目元数据，并支持取消正在进行的请求。
+func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, title, artist string) (*MetadataResult, error) {
 	keywords := buildSearchKeywords(trackID, title, artist)
 	if len(keywords) == 0 {
 		return nil, fmt.Errorf("search keyword is empty")
@@ -74,7 +80,10 @@ func (c *Client) ResolveMetadata(source, trackID, title, artist string) (*Metada
 
 	var lastErr error
 	for _, keyword := range keywords {
-		items, err := c.searchTracks(source, keyword)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		items, err := c.searchTracks(ctx, source, keyword)
 		if err != nil {
 			lastErr = err
 			continue
@@ -502,11 +511,12 @@ func buildSearchKeywords(trackID, title, artist string) []string {
 	return out
 }
 
-func (c *Client) searchTracks(source, keyword string) ([]map[string]interface{}, error) {
+func (c *Client) searchTracks(ctx context.Context, source, keyword string) ([]map[string]interface{}, error) {
 	baseURL := c.selectBaseURL(source)
 
 	var result []map[string]interface{}
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParams(map[string]string{
 			"types":  "search",
 			"source": source,

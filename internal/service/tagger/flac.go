@@ -32,9 +32,6 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 		"--remove-tag=COMPOSER",
 		"--remove-tag=LABEL",
 		"--remove-tag=COMMENT",
-		"--remove-tag=MUSICBRAINZ_RECORDINGID",
-		"--remove-tag=MUSICBRAINZ_ALBUMID",
-		"--remove-tag=MUSICBRAINZ_RELEASEGROUPID",
 		"--remove-tag=LYRICS",
 		"--remove-tag=LYRICS_TRANSLATED",
 		filePath,
@@ -73,9 +70,6 @@ func (t *Tagger) writeFLACTags(filePath string, metadata *model.TrackMetadata) e
 	addTag("COMPOSER", metadata.Composer)
 	addTag("LABEL", metadata.Label)
 	addTag("COMMENT", metadata.Comment)
-	addTag("MUSICBRAINZ_RECORDINGID", metadata.MusicBrainzRecordingID)
-	addTag("MUSICBRAINZ_ALBUMID", metadata.MusicBrainzReleaseID)
-	addTag("MUSICBRAINZ_RELEASEGROUPID", metadata.MusicBrainzReleaseGroupID)
 	addTag("LYRICS", metadata.Lyrics)
 	addTag("LYRICS_TRANSLATED", metadata.Translation)
 

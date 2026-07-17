@@ -93,9 +93,6 @@ func (t *Tagger) WriteMP3TagsWithID3v2(filePath string, metadata *model.TrackMet
 			Value:       value,
 		})
 	}
-	addUserTextFrame("MusicBrainz Recording Id", metadata.MusicBrainzRecordingID)
-	addUserTextFrame("MusicBrainz Album Id", metadata.MusicBrainzReleaseID)
-	addUserTextFrame("MusicBrainz Release Group Id", metadata.MusicBrainzReleaseGroupID)
 	addUserTextFrame("Lyrics Translation", metadata.Translation)
 
 	// 写入封面

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -22,7 +21,7 @@ type Job struct {
 	Title       string `gorm:"size:255" json:"title"`
 	Artist      string `gorm:"size:255" json:"artist"`
 	AlbumArtist string `gorm:"size:255" json:"album_artist"`
-	// AlbumArtistSource 标记专辑歌手的来源，用于区分可靠专辑级信息和单曲回退值。
+	// AlbumArtistSource 标记本地 Album Artist 回退策略。
 	AlbumArtistSource string `gorm:"size:32" json:"-"`
 	Album             string `gorm:"size:255" json:"album"`
 	TrackNumber       int    `json:"track_number"`
@@ -61,57 +60,29 @@ func (Job) TableName() string {
 
 // TrackMetadata 曲目元数据
 type TrackMetadata struct {
-	Title                     string
-	Artist                    string
-	AlbumArtist               string
-	AlbumArtistSource         string
-	Album                     string
-	TrackNumber               int
-	DiscNumber                int
-	Year                      int
-	Date                      string
-	Genre                     string
-	Composer                  string
-	Label                     string
-	Comment                   string
-	MusicBrainzRecordingID    string
-	MusicBrainzReleaseID      string
-	MusicBrainzReleaseGroupID string
-	CoverURL                  string
-	CoverData                 []byte
-	Lyrics                    string
-	Translation               string // 翻译歌词
+	Title       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	TrackNumber int
+	DiscNumber  int
+	Year        int
+	Date        string
+	Genre       string
+	Composer    string
+	Label       string
+	Comment     string
+	CoverURL    string
+	CoverData   []byte
+	Lyrics      string
+	Translation string // 翻译歌词
 }
 
 // JobStatus 任务状态常量
 const (
-	AlbumArtistSourceFingerprint         = "fingerprint"
-	AlbumArtistSourceMusicBrainz         = "musicbrainz"
-	AlbumArtistSourceAlbumShared         = "album_shared"
 	AlbumArtistSourceFallbackFirstArtist = "fallback_first_artist"
 	AlbumArtistSourceFallbackArtist      = "fallback_artist"
 )
-
-func NormalizeAlbumArtistSource(source string) string {
-	return strings.TrimSpace(strings.ToLower(source))
-}
-
-func IsReliableAlbumArtistSource(source string) bool {
-	switch NormalizeAlbumArtistSource(source) {
-	case AlbumArtistSourceFingerprint, AlbumArtistSourceMusicBrainz, AlbumArtistSourceAlbumShared:
-		return true
-	default:
-		return false
-	}
-}
-
-func ReliableAlbumArtistSources() []string {
-	return []string{
-		AlbumArtistSourceFingerprint,
-		AlbumArtistSourceMusicBrainz,
-		AlbumArtistSourceAlbumShared,
-	}
-}
 
 const (
 	JobStatusQueued      = "queued"

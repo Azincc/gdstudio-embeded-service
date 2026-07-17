@@ -3,7 +3,6 @@ package repository
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/model"
@@ -48,76 +47,6 @@ func (r *JobRepository) FindByIdempotencyKey(key string) (*model.Job, error) {
 		return nil, err
 	}
 	return &job, nil
-}
-
-// FindReliableAlbumArtist 查找同来源、同库、同专辑下已确认的专辑歌手。
-func (r *JobRepository) FindReliableAlbumArtist(source, libraryID, album, excludeID string) (string, string, error) {
-	album = strings.TrimSpace(album)
-	if album == "" {
-		return "", "", nil
-	}
-
-	var job model.Job
-	query := r.db.
-		Where("source = ? AND library_id = ? AND LOWER(TRIM(album)) = LOWER(TRIM(?))",
-			source, libraryID, album).
-		Where("album_artist <> ''").
-		Where("album_artist_source IN ?", model.ReliableAlbumArtistSources())
-	if excludeID != "" {
-		query = query.Where("id <> ?", excludeID)
-	}
-
-	result := query.
-		Order("CASE album_artist_source " +
-			"WHEN 'fingerprint' THEN 0 " +
-			"WHEN 'musicbrainz' THEN 1 " +
-			"WHEN 'album_shared' THEN 2 " +
-			"ELSE 9 END").
-		Order("updated_at DESC").
-		Limit(1).
-		Find(&job)
-	if result.Error != nil {
-		return "", "", result.Error
-	}
-	if result.RowsAffected == 0 {
-		return "", "", nil
-	}
-
-	return strings.TrimSpace(job.AlbumArtist), model.NormalizeAlbumArtistSource(job.AlbumArtistSource), nil
-}
-
-// PropagateReliableAlbumArtist 将可靠专辑歌手回填到尚未完成的同专辑任务，避免每首歌各自回退。
-func (r *JobRepository) PropagateReliableAlbumArtist(source, libraryID, album, albumArtist, excludeID string) error {
-	album = strings.TrimSpace(album)
-	albumArtist = strings.TrimSpace(albumArtist)
-	if album == "" || albumArtist == "" {
-		return nil
-	}
-
-	incompleteStatuses := []string{
-		model.JobStatusQueued,
-		model.JobStatusResolving,
-		model.JobStatusDownloading,
-		model.JobStatusTagging,
-		model.JobStatusMoving,
-		model.JobStatusScanning,
-	}
-
-	query := r.db.Model(&model.Job{}).
-		Where("source = ? AND library_id = ? AND LOWER(TRIM(album)) = LOWER(TRIM(?))",
-			source, libraryID, album).
-		Where("status IN ?", incompleteStatuses).
-		Where("(album_artist = '' OR COALESCE(album_artist_source, '') NOT IN ?)",
-			model.ReliableAlbumArtistSources())
-	if excludeID != "" {
-		query = query.Where("id <> ?", excludeID)
-	}
-
-	return query.Updates(map[string]interface{}{
-		"album_artist":        albumArtist,
-		"album_artist_source": model.AlbumArtistSourceAlbumShared,
-		"updated_at":          time.Now(),
-	}).Error
 }
 
 // Update 更新任务

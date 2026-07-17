@@ -42,9 +42,6 @@ NAVIDROME_USER=admin
 NAVIDROME_PASSWORD=your_password
 NAVIDROME_MUSIC_DIR=/path/to/music
 API_KEY=your-secure-api-key
-MUSICBRAINZ_ENABLED=true
-# 可选：开启指纹识别时填写
-# ACOUSTID_CLIENT=your-acoustid-client-key
 EOF
 
 # 3. 启动服务
@@ -213,14 +210,6 @@ MAX_CONCURRENT_JOBS=3
 JOB_POLL_INTERVAL=2s
 DOWNLOAD_TIMEOUT=600s
 LOG_LEVEL=info
-
-# MusicBrainz 元数据
-MUSICBRAINZ_ENABLED=true
-MUSICBRAINZ_BASE_URL=https://musicbrainz.org/ws/2
-COVERARTARCHIVE_BASE_URL=https://coverartarchive.org
-ACOUSTID_BASE_URL=https://api.acoustid.org/v2
-# 可选：开启指纹识别时填写
-ACOUSTID_CLIENT=your-acoustid-client-key
 ```
 
 ## 开发路线图

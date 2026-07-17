@@ -1,12 +1,17 @@
 package metadata
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/model"
+	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
 	"go.uber.org/zap"
 )
 
@@ -49,19 +54,35 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 		t.Fatalf("write temp audio file failed: %v", err)
 	}
 
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Query().Get("types") != "search" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"candidate-1","name":"Example Song","artist":"Example Artist","album":"Example Album","trackNumber":1,"year":2024}]`))
+	}))
+	defer server.Close()
+
+	logger := zap.NewNop()
+	gdClient := gdstudio.NewClient(&config.GDStudioConfig{
+		BaseURL: server.URL,
+		Timeout: time.Second,
+	}, logger)
+
 	resolver := NewResolver(
 		&config.Config{
 			Storage: config.StorageConfig{
 				MusicDir: musicDir,
 			},
 		},
-		nil,
-		nil,
-		zap.NewNop(),
+		gdClient,
+		logger,
 	)
 
 	var statuses []string
 	response, resolvedPath, err := resolver.ResolveCandidates(
+		context.Background(),
 		model.SongMetadataReference{
 			ID:     "song-1",
 			Path:   "song.ogg",
@@ -85,9 +106,17 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	if response.Current.Title != "Example Song" || response.Current.Artist != "Example Artist" {
 		t.Fatalf("unexpected current metadata: %+v", response.Current)
 	}
+	if len(response.Candidates) != 2 {
+		t.Fatalf("expected two source candidates, got %#v", response.Candidates)
+	}
+	if response.Candidates[0].Source != "gdstudio_netease" {
+		t.Fatalf("unexpected first candidate source: %q", response.Candidates[0].Source)
+	}
+	if response.Candidates[1].Source != "gdstudio_kuwo" {
+		t.Fatalf("unexpected second candidate source: %q", response.Candidates[1].Source)
+	}
 
 	wantStatuses := []string{
-		model.MetadataCandidatesJobStatusMatchingFingerprint,
 		model.MetadataCandidatesJobStatusSearchingSong,
 		model.MetadataCandidatesJobStatusMergingData,
 	}

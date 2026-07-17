@@ -116,12 +116,11 @@ func (MetadataJob) TableName() string {
 }
 
 const (
-	MetadataCandidatesJobStatusQueued              = "queued"
-	MetadataCandidatesJobStatusMatchingFingerprint = "matching_fingerprint"
-	MetadataCandidatesJobStatusSearchingSong       = "searching_song"
-	MetadataCandidatesJobStatusMergingData         = "merging_data"
-	MetadataCandidatesJobStatusDone                = "done"
-	MetadataCandidatesJobStatusFailed              = "failed"
+	MetadataCandidatesJobStatusQueued        = "queued"
+	MetadataCandidatesJobStatusSearchingSong = "searching_song"
+	MetadataCandidatesJobStatusMergingData   = "merging_data"
+	MetadataCandidatesJobStatusDone          = "done"
+	MetadataCandidatesJobStatusFailed        = "failed"
 
 	MetadataJobStatusQueued          = "queued"
 	MetadataJobStatusReading         = "reading"

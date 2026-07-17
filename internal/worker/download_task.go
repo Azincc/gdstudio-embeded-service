@@ -14,7 +14,6 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/repository"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
-	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	"github.com/azin/gdstudio-embed-service/internal/service/navidrome"
 	"github.com/azin/gdstudio-embed-service/internal/service/tagger"
 	"go.uber.org/zap"
@@ -45,7 +44,6 @@ type DownloadTask struct {
 	gdClient   *gdstudio.Client
 	naviClient *navidrome.Client
 	tagger     *tagger.Tagger
-	mbClient   *musicbrainz.Client
 	logger     *zap.Logger
 }
 
@@ -56,7 +54,6 @@ func NewDownloadTask(
 	gdClient *gdstudio.Client,
 	naviClient *navidrome.Client,
 	tagger *tagger.Tagger,
-	mbClient *musicbrainz.Client,
 	logger *zap.Logger,
 ) *DownloadTask {
 	return &DownloadTask{
@@ -65,7 +62,6 @@ func NewDownloadTask(
 		gdClient:   gdClient,
 		naviClient: naviClient,
 		tagger:     tagger,
-		mbClient:   mbClient,
 		logger:     logger,
 	}
 }
@@ -363,71 +359,38 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 
 	var coverURL string
 	var coverData []byte
-	var brainzMeta *musicbrainz.FingerprintMetadata
-	if t.mbClient != nil {
-		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-			resolved, lookupErr := t.mbClient.LookupTrackMetadataByFingerprint(job.FilePath)
-			if lookupErr != nil {
-				return lookupErr
-			}
-			brainzMeta = resolved
-			return nil
-		}, nil)
-		if err != nil {
-			t.logger.Warn("brainz fingerprint metadata lookup failed",
-				zap.String("job_id", payload.JobID),
-				zap.Error(err))
-		}
-		if brainzMeta == nil {
-			err = retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-				resolved, lookupErr := t.mbClient.LookupTrackMetadata(job.Title, job.Artist, job.Album)
-				if lookupErr != nil {
-					return lookupErr
-				}
-				brainzMeta = resolved
-				return nil
-			}, nil)
-			if err != nil {
-				t.logger.Warn("brainz search metadata lookup failed",
-					zap.String("job_id", payload.JobID),
-					zap.String("title", job.Title),
-					zap.String("artist", job.Artist),
-					zap.String("album", job.Album),
-					zap.Error(err))
-			}
-		}
-		if brainzMeta != nil {
-			applyFingerprintMetadata(job, brainzMeta)
-			coverURL = brainzMeta.CoverURL
-			coverData = brainzMeta.CoverData
-		}
-	}
 
 	var gdMeta *gdstudio.MetadataResult
-	if shouldResolveGDMetadata(job, payload.TrackID, coverID, lyricID, brainzMeta) {
-		err := retryWithBackoff(auxMaxRetries, auxRetryBaseWait, func() error {
-			resolved, lookupErr := t.gdClient.ResolveMetadata(payload.Source, payload.TrackID, job.Title, job.Artist)
+	err = gdstudio.RetryMetadata(
+		ctx,
+		func(metadataCtx context.Context) error {
+			resolved, lookupErr := t.gdClient.ResolveMetadataContext(
+				metadataCtx,
+				payload.Source,
+				payload.TrackID,
+				job.Title,
+				job.Artist,
+			)
 			if lookupErr != nil {
 				return lookupErr
+			}
+			if resolved == nil {
+				return fmt.Errorf("gdmusic returned empty metadata")
 			}
 			gdMeta = resolved
 			return nil
-		}, nil)
-		if err != nil {
-			t.logger.Warn("gdstudio metadata lookup failed",
-				zap.String("job_id", payload.JobID),
-				zap.String("source", payload.Source),
-				zap.String("track_id", payload.TrackID),
-				zap.Error(err))
-		} else if gdMeta != nil {
-			applyGDMetadata(job, gdMeta)
-			if gdMeta.PicID != "" && (coverID == "" || coverID == payload.TrackID || coverID == payload.PicID) {
-				coverID = gdMeta.PicID
-			}
-			if gdMeta.LyricID != "" && (lyricID == "" || lyricID == payload.TrackID || lyricID == payload.LyricID) {
-				lyricID = gdMeta.LyricID
-			}
-		}
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("gdmusic metadata lookup failed after retrying for up to %s: %w", gdstudio.MetadataRetryMaxElapsed, err)
+	}
+
+	applyGDMetadata(job, gdMeta)
+	if gdMeta.PicID != "" {
+		coverID = gdMeta.PicID
+	}
+	if gdMeta.LyricID != "" {
+		lyricID = gdMeta.LyricID
 	}
 
 	if len(coverData) == 0 {
@@ -501,44 +464,25 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 		job.LyricID = lyricID
 	}
 
-	albumArtist := job.AlbumArtist
-	albumArtistSource := model.NormalizeAlbumArtistSource(job.AlbumArtistSource)
-	if albumArtist == "" || !model.IsReliableAlbumArtistSource(albumArtistSource) {
-		albumArtist, albumArtistSource = t.determineAlbumArtist(job)
-		job.AlbumArtist = albumArtist
-		job.AlbumArtistSource = albumArtistSource
-	}
+	albumArtist, albumArtistSource := t.resolveAlbumArtist(job.Artist)
+	job.AlbumArtist = albumArtist
+	job.AlbumArtistSource = albumArtistSource
 
 	// 构建元数据
 	metadata := &model.TrackMetadata{
-		Title:             job.Title,
-		Artist:            job.Artist,
-		AlbumArtist:       albumArtist,
-		AlbumArtistSource: albumArtistSource,
-		Album:             job.Album,
-		TrackNumber:       job.TrackNumber,
-		Year:              job.Year,
-		CoverURL:          coverURL,
-		CoverData:         coverData,
-		Lyrics:            lyrics,
-		Translation:       translation,
-	}
-	if brainzMeta != nil {
-		metadata.DiscNumber = brainzMeta.DiscNumber
-		metadata.Date = brainzMeta.Date
-		metadata.MusicBrainzRecordingID = brainzMeta.MusicBrainzRecordingID
-		metadata.MusicBrainzReleaseID = brainzMeta.MusicBrainzReleaseID
-		metadata.MusicBrainzReleaseGroupID = brainzMeta.MusicBrainzReleaseGroupID
+		Title:       job.Title,
+		Artist:      job.Artist,
+		AlbumArtist: albumArtist,
+		Album:       job.Album,
+		TrackNumber: job.TrackNumber,
+		Year:        job.Year,
+		CoverURL:    coverURL,
+		CoverData:   coverData,
+		Lyrics:      lyrics,
+		Translation: translation,
 	}
 	if err := t.repo.Update(job); err != nil {
 		t.logger.Warn("failed to persist enriched metadata", zap.Error(err))
-	} else if model.IsReliableAlbumArtistSource(job.AlbumArtistSource) {
-		if err := t.repo.PropagateReliableAlbumArtist(job.Source, job.LibraryID, job.Album, job.AlbumArtist, job.ID); err != nil {
-			t.logger.Warn("failed to share album artist with same album jobs",
-				zap.String("job_id", job.ID),
-				zap.String("album", job.Album),
-				zap.Error(err))
-		}
 	}
 
 	// 写入标签
@@ -557,22 +501,7 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	return nil
 }
 
-func shouldResolveGDMetadata(job *model.Job, trackID, coverID, lyricID string, brainzMeta *musicbrainz.FingerprintMetadata) bool {
-	if brainzMeta == nil {
-		return true
-	}
-	return job.Title == "" ||
-		job.Artist == "" ||
-		job.Album == "" ||
-		job.TrackNumber == 0 ||
-		job.Year == 0 ||
-		coverID == "" ||
-		coverID == trackID ||
-		lyricID == "" ||
-		lyricID == trackID
-}
-
-func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintMetadata) {
+func applyGDMetadata(job *model.Job, metadata *gdstudio.MetadataResult) {
 	if metadata == nil {
 		return
 	}
@@ -582,10 +511,6 @@ func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintM
 	if metadata.Artist != "" {
 		job.Artist = metadata.Artist
 	}
-	if metadata.AlbumArtist != "" {
-		job.AlbumArtist = metadata.AlbumArtist
-		job.AlbumArtistSource = model.NormalizeAlbumArtistSource(metadata.AlbumArtistSource)
-	}
 	if metadata.Album != "" {
 		job.Album = metadata.Album
 	}
@@ -593,75 +518,6 @@ func applyFingerprintMetadata(job *model.Job, metadata *musicbrainz.FingerprintM
 		job.TrackNumber = metadata.TrackNumber
 	}
 	if metadata.Year > 0 {
-		job.Year = metadata.Year
-	}
-}
-
-func (t *DownloadTask) determineAlbumArtist(job *model.Job) (string, string) {
-	if job == nil {
-		return "", ""
-	}
-
-	currentArtist := strings.TrimSpace(job.AlbumArtist)
-	currentSource := model.NormalizeAlbumArtistSource(job.AlbumArtistSource)
-	if selectedArtist, selectedSource, ok := chooseAlbumArtist(currentArtist, currentSource, ""); ok {
-		return selectedArtist, selectedSource
-	}
-
-	if t.repo != nil {
-		sharedArtist, sharedSource, err := t.repo.FindReliableAlbumArtist(job.Source, job.LibraryID, job.Album, job.ID)
-		if err != nil {
-			t.logger.Warn("failed to load album artist from same album",
-				zap.String("job_id", job.ID),
-				zap.String("album", job.Album),
-				zap.Error(err))
-		} else if sharedArtist != "" {
-			t.logger.Info("album artist reused from same album",
-				zap.String("job_id", job.ID),
-				zap.String("album", job.Album),
-				zap.String("album_artist", sharedArtist),
-				zap.String("source", sharedSource))
-			if selectedArtist, selectedSource, ok := chooseAlbumArtist(currentArtist, currentSource, sharedArtist); ok {
-				return selectedArtist, selectedSource
-			}
-		}
-	}
-
-	return t.resolveAlbumArtist(job.Title, job.Artist, job.Album)
-}
-
-func chooseAlbumArtist(currentArtist, currentSource, sharedArtist string) (string, string, bool) {
-	currentArtist = strings.TrimSpace(currentArtist)
-	currentSource = model.NormalizeAlbumArtistSource(currentSource)
-	if currentArtist != "" && model.IsReliableAlbumArtistSource(currentSource) {
-		return currentArtist, currentSource, true
-	}
-
-	sharedArtist = strings.TrimSpace(sharedArtist)
-	if sharedArtist != "" {
-		return sharedArtist, model.AlbumArtistSourceAlbumShared, true
-	}
-
-	return "", "", false
-}
-
-func applyGDMetadata(job *model.Job, metadata *gdstudio.MetadataResult) {
-	if metadata == nil {
-		return
-	}
-	if job.Title == "" && metadata.Title != "" {
-		job.Title = metadata.Title
-	}
-	if job.Artist == "" && metadata.Artist != "" {
-		job.Artist = metadata.Artist
-	}
-	if job.Album == "" && metadata.Album != "" {
-		job.Album = metadata.Album
-	}
-	if job.TrackNumber == 0 && metadata.TrackNumber > 0 {
-		job.TrackNumber = metadata.TrackNumber
-	}
-	if job.Year == 0 && metadata.Year > 0 {
 		job.Year = metadata.Year
 	}
 }
@@ -946,23 +802,10 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-// resolveAlbumArtist 查询 Album Artist：MusicBrainz → fallback 第一艺术家
-func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) (string, string) {
-	// 先尝试 MusicBrainz
-	if t.mbClient != nil {
-		albumArtist, err := t.mbClient.LookupAlbumArtist(title, artist, album)
-		if err != nil {
-			t.logger.Warn("musicbrainz lookup failed", zap.Error(err))
-		} else if albumArtist != "" {
-			t.logger.Info("album artist resolved via musicbrainz",
-				zap.String("title", title),
-				zap.String("album_artist", albumArtist))
-			return albumArtist, model.AlbumArtistSourceMusicBrainz
-		}
-	}
-
-	// Fallback：从 Artist 字段提取第一个艺术家
-	fallback := musicbrainz.ExtractFirstArtist(artist)
+// resolveAlbumArtist 从曲目 Artist 中提取 Album Artist，不再依赖外部元数据服务。
+func (t *DownloadTask) resolveAlbumArtist(artist string) (string, string) {
+	artist = strings.TrimSpace(artist)
+	fallback := extractFirstArtist(artist)
 	if fallback != artist && fallback != "" {
 		t.logger.Info("album artist fallback to first artist",
 			zap.String("original", artist),
@@ -972,4 +815,22 @@ func (t *DownloadTask) resolveAlbumArtist(title, artist, album string) (string, 
 
 	// 如果 Artist 本身就是单人的，直接用
 	return artist, model.AlbumArtistSourceFallbackArtist
+}
+
+func extractFirstArtist(artist string) string {
+	artist = strings.TrimSpace(artist)
+	if artist == "" {
+		return ""
+	}
+
+	for _, sep := range []string{" / ", "/", ",", ";", "、"} {
+		if idx := strings.Index(artist, sep); idx >= 0 {
+			first := strings.TrimSpace(artist[:idx])
+			if first != "" {
+				return first
+			}
+		}
+	}
+
+	return artist
 }

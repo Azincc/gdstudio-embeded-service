@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -56,7 +57,7 @@ func (h *MetadataHandler) Candidates(c *gin.Context) {
 		return
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(req.Song, nil)
+	response, _, err := h.resolver.ResolveCandidates(c.Request.Context(), req.Song, nil)
 	if err != nil {
 		h.logger.Warn("resolve metadata candidates failed",
 			zap.String("song_id", req.Song.ID),
@@ -198,7 +199,7 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		}
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(song, reportProgress)
+	response, _, err := h.resolver.ResolveCandidates(context.Background(), song, reportProgress)
 	if err != nil {
 		h.logger.Warn("process metadata candidates job failed",
 			zap.String("job_id", jobID),

@@ -3,6 +3,7 @@ package metadata
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
-	"github.com/azin/gdstudio-embed-service/internal/service/musicbrainz"
 	id3v2 "github.com/bogem/id3v2/v2"
 	"go.uber.org/zap"
 )
@@ -26,7 +26,6 @@ import (
 type Resolver struct {
 	cfg        *config.Config
 	gdClient   *gdstudio.Client
-	mbClient   *musicbrainz.Client
 	httpClient *http.Client
 	logger     *zap.Logger
 }
@@ -34,13 +33,11 @@ type Resolver struct {
 func NewResolver(
 	cfg *config.Config,
 	gdClient *gdstudio.Client,
-	mbClient *musicbrainz.Client,
 	logger *zap.Logger,
 ) *Resolver {
 	return &Resolver{
 		cfg:      cfg,
 		gdClient: gdClient,
-		mbClient: mbClient,
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
 		},
@@ -83,6 +80,7 @@ func ResolveSongPath(cfg *config.Config, rawPath string) (string, error) {
 }
 
 func (r *Resolver) ResolveCandidates(
+	ctx context.Context,
 	song model.SongMetadataReference,
 	progress func(status, message string),
 ) (*model.MetadataCandidatesResponse, string, error) {
@@ -121,7 +119,7 @@ func (r *Resolver) ResolveCandidates(
 		if metadata.Title == "" && metadata.Artist == "" && metadata.Album == "" {
 			return
 		}
-		key := candidateKey(metadata)
+		key := source + "\x00" + candidateKey(metadata)
 		if _, ok := seen[key]; ok {
 			return
 		}
@@ -137,63 +135,91 @@ func (r *Resolver) ResolveCandidates(
 	lookupArtist := firstNonEmpty(current.Artist, song.Artist)
 	lookupAlbum := firstNonEmpty(current.Album, song.Album)
 
-	reportProgress(model.MetadataCandidatesJobStatusMatchingFingerprint, "")
-	if r.mbClient != nil {
-		if fpMeta, fpErr := r.mbClient.LookupTrackMetadataByFingerprint(absolutePath); fpErr != nil {
-			r.logger.Warn("fingerprint candidate lookup failed",
-				zap.String("path", absolutePath),
-				zap.Error(fpErr))
-		} else if fpMeta != nil {
-			addCandidate("musicbrainz_fingerprint", 0.97, editableFromFingerprint(fpMeta))
-		}
-	}
-
 	reportProgress(model.MetadataCandidatesJobStatusSearchingSong, "")
-	if r.mbClient != nil {
-		if mbMeta, mbErr := r.mbClient.LookupTrackMetadata(lookupTitle, lookupArtist, lookupAlbum); mbErr != nil {
-			r.logger.Warn("musicbrainz search candidate lookup failed",
-				zap.String("title", lookupTitle),
-				zap.String("artist", lookupArtist),
-				zap.String("album", lookupAlbum),
-				zap.Error(mbErr))
-		} else if mbMeta != nil {
-			addCandidate("musicbrainz_search", 0.88, editableFromFingerprint(mbMeta))
-		}
+	if r.gdClient == nil {
+		return nil, absolutePath, fmt.Errorf("gdmusic client is unavailable")
 	}
 
-	if r.gdClient != nil {
-		for _, source := range []string{"netease", "kuwo"} {
-			gdMeta, gdErr := r.gdClient.ResolveMetadata(source, "", lookupTitle, lookupArtist)
-			if gdErr != nil || gdMeta == nil {
-				if gdErr != nil {
-					r.logger.Debug("gdstudio candidate lookup failed",
+	type sourceLookupResult struct {
+		source   string
+		metadata *gdstudio.MetadataResult
+		err      error
+	}
+
+	candidateSources := []string{"netease", "kuwo"}
+	resultCh := make(chan sourceLookupResult, len(candidateSources))
+	for _, source := range candidateSources {
+		source := source
+		go func() {
+			var resolved *gdstudio.MetadataResult
+			err := gdstudio.RetryMetadata(ctx, func(retryCtx context.Context) error {
+				gdMeta, lookupErr := r.gdClient.ResolveMetadataContext(
+					retryCtx,
+					source,
+					"",
+					lookupTitle,
+					lookupArtist,
+				)
+				if lookupErr != nil {
+					r.logger.Debug("gdmusic candidate lookup failed",
 						zap.String("source", source),
-						zap.Error(gdErr))
+						zap.Error(lookupErr))
+					return lookupErr
 				}
-				continue
+				if gdMeta == nil {
+					return fmt.Errorf("gdmusic returned empty metadata")
+				}
+				resolved = gdMeta
+				return nil
+			})
+			resultCh <- sourceLookupResult{
+				source:   source,
+				metadata: resolved,
+				err:      err,
 			}
+		}()
+	}
 
-			editable := model.EditableMetadata{
-				Title:       firstNonEmpty(gdMeta.Title, lookupTitle),
-				Artist:      firstNonEmpty(gdMeta.Artist, lookupArtist),
-				Album:       firstNonEmpty(gdMeta.Album, lookupAlbum),
-				AlbumArtist: firstNonEmpty(gdMeta.Artist, lookupArtist),
-				TrackNumber: gdMeta.TrackNumber,
-				Year:        gdMeta.Year,
-			}
-			if gdMeta.PicID != "" {
-				if coverURL, coverErr := r.gdClient.ResolveCover(source, gdMeta.PicID); coverErr == nil {
-					editable.CoverURL = coverURL
-				}
-			}
-			if gdMeta.LyricID != "" {
-				if lyricResult, lyricErr := r.gdClient.ResolveLyrics(source, gdMeta.LyricID); lyricErr == nil && lyricResult != nil {
-					editable.Lyrics = lyricResult.Lyric
-				}
-			}
-
-			addCandidate("gdstudio_"+source, 0.76, editable)
+	resolvedBySource := make(map[string]*gdstudio.MetadataResult, len(candidateSources))
+	lookupErrors := make([]error, 0, len(candidateSources))
+	for range candidateSources {
+		result := <-resultCh
+		if result.err != nil {
+			lookupErrors = append(lookupErrors, fmt.Errorf("%s: %w", result.source, result.err))
+			continue
 		}
+		resolvedBySource[result.source] = result.metadata
+	}
+	if len(lookupErrors) > 0 {
+		return nil, absolutePath, fmt.Errorf(
+			"gdmusic candidate lookup failed after independent retries of up to %s: %w",
+			gdstudio.MetadataRetryMaxElapsed,
+			errors.Join(lookupErrors...),
+		)
+	}
+
+	for _, source := range candidateSources {
+		gdMeta := resolvedBySource[source]
+		editable := model.EditableMetadata{
+			Title:       firstNonEmpty(gdMeta.Title, lookupTitle),
+			Artist:      firstNonEmpty(gdMeta.Artist, lookupArtist),
+			Album:       firstNonEmpty(gdMeta.Album, lookupAlbum),
+			AlbumArtist: firstNonEmpty(gdMeta.Artist, lookupArtist),
+			TrackNumber: gdMeta.TrackNumber,
+			Year:        gdMeta.Year,
+		}
+		if gdMeta.PicID != "" {
+			if coverURL, coverErr := r.gdClient.ResolveCover(source, gdMeta.PicID); coverErr == nil {
+				editable.CoverURL = coverURL
+			}
+		}
+		if gdMeta.LyricID != "" {
+			if lyricResult, lyricErr := r.gdClient.ResolveLyrics(source, gdMeta.LyricID); lyricErr == nil && lyricResult != nil {
+				editable.Lyrics = lyricResult.Lyric
+			}
+		}
+
+		addCandidate("gdstudio_"+source, 0.76, editable)
 	}
 
 	reportProgress(model.MetadataCandidatesJobStatusMergingData, "")
@@ -243,22 +269,6 @@ func (r *Resolver) DownloadCover(ctx context.Context, rawURL string) ([]byte, er
 		return nil, fmt.Errorf("cover response is empty")
 	}
 	return data, nil
-}
-
-func editableFromFingerprint(metadata *musicbrainz.FingerprintMetadata) model.EditableMetadata {
-	if metadata == nil {
-		return model.EditableMetadata{}
-	}
-	return model.EditableMetadata{
-		Title:       metadata.Title,
-		Artist:      metadata.Artist,
-		Album:       metadata.Album,
-		AlbumArtist: metadata.AlbumArtist,
-		TrackNumber: metadata.TrackNumber,
-		DiscNumber:  metadata.DiscNumber,
-		Year:        metadata.Year,
-		CoverURL:    metadata.CoverURL,
-	}
 }
 
 func sanitizeEditableMetadata(metadata model.EditableMetadata) model.EditableMetadata {
