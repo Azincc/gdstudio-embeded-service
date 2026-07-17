@@ -134,6 +134,7 @@ func (r *Resolver) ResolveCandidates(
 	lookupTitle := firstNonEmpty(current.Title, song.Title)
 	lookupArtist := firstNonEmpty(current.Artist, song.Artist)
 	lookupAlbum := firstNonEmpty(current.Album, song.Album)
+	lookupStartedAt := time.Now()
 
 	reportProgress(model.MetadataCandidatesJobStatusSearchingSong, "")
 	if r.gdClient == nil {
@@ -151,8 +152,18 @@ func (r *Resolver) ResolveCandidates(
 	for _, source := range candidateSources {
 		source := source
 		go func() {
+			sourceStartedAt := time.Now()
+			attempts := 0
 			var resolved *gdstudio.MetadataResult
+			r.logger.Info("metadata candidate source lookup started",
+				zap.String("song_id", song.ID),
+				zap.String("source", source),
+				zap.String("title", lookupTitle),
+				zap.String("artist", lookupArtist),
+				zap.Duration("retry_window", gdstudio.MetadataRetryMaxElapsed))
 			err := gdstudio.RetryMetadata(ctx, func(retryCtx context.Context) error {
+				attempts++
+				attemptStartedAt := time.Now()
 				gdMeta, lookupErr := r.gdClient.ResolveMetadataContext(
 					retryCtx,
 					source,
@@ -161,17 +172,44 @@ func (r *Resolver) ResolveCandidates(
 					lookupArtist,
 				)
 				if lookupErr != nil {
-					r.logger.Debug("gdmusic candidate lookup failed",
+					r.logger.Warn("metadata candidate source attempt failed",
+						zap.String("song_id", song.ID),
 						zap.String("source", source),
+						zap.Int("attempt", attempts),
+						zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
 						zap.Error(lookupErr))
 					return lookupErr
 				}
 				if gdMeta == nil {
-					return fmt.Errorf("gdmusic returned empty metadata")
+					emptyErr := fmt.Errorf("gdmusic returned empty metadata")
+					r.logger.Warn("metadata candidate source attempt failed",
+						zap.String("song_id", song.ID),
+						zap.String("source", source),
+						zap.Int("attempt", attempts),
+						zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
+						zap.Error(emptyErr))
+					return emptyErr
 				}
 				resolved = gdMeta
 				return nil
 			})
+			if err != nil {
+				r.logger.Warn("metadata candidate source lookup exhausted",
+					zap.String("song_id", song.ID),
+					zap.String("source", source),
+					zap.Int("attempts", attempts),
+					zap.Duration("elapsed", time.Since(sourceStartedAt)),
+					zap.Error(err))
+			} else {
+				r.logger.Info("metadata candidate source lookup succeeded",
+					zap.String("song_id", song.ID),
+					zap.String("source", source),
+					zap.Int("attempts", attempts),
+					zap.Duration("elapsed", time.Since(sourceStartedAt)),
+					zap.String("title", resolved.Title),
+					zap.String("artist", resolved.Artist),
+					zap.String("album", resolved.Album))
+			}
 			resultCh <- sourceLookupResult{
 				source:   source,
 				metadata: resolved,
@@ -221,6 +259,10 @@ func (r *Resolver) ResolveCandidates(
 
 		addCandidate("gdstudio_"+source, 0.76, editable)
 	}
+	r.logger.Info("metadata candidate sources resolved",
+		zap.String("song_id", song.ID),
+		zap.Int("candidate_count", len(candidates)),
+		zap.Duration("elapsed", time.Since(lookupStartedAt)))
 
 	reportProgress(model.MetadataCandidatesJobStatusMergingData, "")
 	return &model.MetadataCandidatesResponse{

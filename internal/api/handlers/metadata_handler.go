@@ -91,6 +91,13 @@ func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create metadata candidates job"})
 		return
 	}
+	h.logger.Info("metadata candidates job queued",
+		zap.String("job_id", job.ID),
+		zap.String("song_id", job.SongID),
+		zap.String("library_id", job.LibraryID),
+		zap.String("path", job.SongPath),
+		zap.String("title", req.Song.Title),
+		zap.String("artist", req.Song.Artist))
 
 	go h.processCandidatesJob(job.ID, req.Song)
 
@@ -173,6 +180,13 @@ func (h *MetadataHandler) Apply(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create metadata job"})
 		return
 	}
+	h.logger.Info("metadata apply job queued",
+		zap.String("job_id", job.ID),
+		zap.String("song_id", job.SongID),
+		zap.String("library_id", job.LibraryID),
+		zap.String("path", job.SongPath),
+		zap.String("title", req.Metadata.Title),
+		zap.String("artist", req.Metadata.Artist))
 
 	c.JSON(http.StatusOK, gin.H{
 		"job_id": job.ID,
@@ -191,12 +205,25 @@ func (h *MetadataHandler) GetJob(c *gin.Context) {
 }
 
 func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMetadataReference) {
+	startedAt := time.Now()
+	h.logger.Info("metadata candidates job started",
+		zap.String("job_id", jobID),
+		zap.String("song_id", song.ID),
+		zap.String("title", song.Title),
+		zap.String("artist", song.Artist),
+		zap.Strings("sources", []string{"netease", "kuwo"}))
+
 	reportProgress := func(status, message string) {
 		if err := h.candidatesRepo.UpdateStatus(jobID, status, message); err != nil {
 			h.logger.Warn("update metadata candidates job status failed",
 				zap.String("job_id", jobID),
 				zap.Error(err))
+			return
 		}
+		h.logger.Info("metadata candidates job status changed",
+			zap.String("job_id", jobID),
+			zap.String("song_id", song.ID),
+			zap.String("status", status))
 	}
 
 	response, _, err := h.resolver.ResolveCandidates(context.Background(), song, reportProgress)
@@ -204,6 +231,7 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		h.logger.Warn("process metadata candidates job failed",
 			zap.String("job_id", jobID),
 			zap.String("song_id", song.ID),
+			zap.Duration("elapsed", time.Since(startedAt)),
 			zap.Error(err))
 		if markErr := h.candidatesRepo.MarkFailed(jobID, err); markErr != nil {
 			h.logger.Warn("mark metadata candidates job failed failed",
@@ -216,6 +244,10 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 	resultJSON, err := json.Marshal(response)
 	if err != nil {
 		marshalErr := fmt.Errorf("encode metadata candidates response failed: %w", err)
+		h.logger.Error("encode metadata candidates job result failed",
+			zap.String("job_id", jobID),
+			zap.String("song_id", song.ID),
+			zap.Error(marshalErr))
 		if markErr := h.candidatesRepo.MarkFailed(jobID, marshalErr); markErr != nil {
 			h.logger.Warn("mark metadata candidates job failed after encode error",
 				zap.String("job_id", jobID),
@@ -228,5 +260,11 @@ func (h *MetadataHandler) processCandidatesJob(jobID string, song model.SongMeta
 		h.logger.Warn("mark metadata candidates job done failed",
 			zap.String("job_id", jobID),
 			zap.Error(err))
+		return
 	}
+	h.logger.Info("metadata candidates job completed",
+		zap.String("job_id", jobID),
+		zap.String("song_id", song.ID),
+		zap.Int("candidate_count", len(response.Candidates)),
+		zap.Duration("elapsed", time.Since(startedAt)))
 }

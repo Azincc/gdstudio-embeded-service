@@ -13,6 +13,7 @@ import (
 	"github.com/azin/gdstudio-embed-service/internal/model"
 	"github.com/azin/gdstudio-embed-service/internal/service/gdstudio"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestParseMetaflacTagsPreservesMultilineLyrics(t *testing.T) {
@@ -64,7 +65,8 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := zap.NewNop()
+	logCore, observedLogs := observer.New(zap.InfoLevel)
+	logger := zap.New(logCore)
 	gdClient := gdstudio.NewClient(&config.GDStudioConfig{
 		BaseURL: server.URL,
 		Timeout: time.Second,
@@ -114,6 +116,12 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	}
 	if response.Candidates[1].Source != "gdstudio_kuwo" {
 		t.Fatalf("unexpected second candidate source: %q", response.Candidates[1].Source)
+	}
+	if got := observedLogs.FilterMessage("metadata candidate source lookup succeeded").Len(); got != 2 {
+		t.Fatalf("expected two source success logs, got %d", got)
+	}
+	if got := observedLogs.FilterMessage("metadata candidate sources resolved").Len(); got != 1 {
+		t.Fatalf("expected one candidate summary log, got %d", got)
 	}
 
 	wantStatuses := []string{

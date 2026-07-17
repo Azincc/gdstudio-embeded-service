@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/config"
 	"github.com/azin/gdstudio-embed-service/internal/model"
@@ -46,6 +47,11 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 	if job == nil {
 		return fmt.Errorf("metadata job is nil")
 	}
+	startedAt := time.Now()
+	t.logger.Info("metadata apply job started",
+		zap.String("job_id", job.ID),
+		zap.String("song_id", job.SongID),
+		zap.String("path", job.SongPath))
 
 	filePath, err := metadatasvc.ResolveSongPath(t.cfg, job.SongPath)
 	if err != nil {
@@ -100,6 +106,14 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 		CoverURL:    editable.CoverURL,
 		CoverData:   coverData,
 	}
+	t.logger.Info("writing edited metadata tags",
+		zap.String("job_id", job.ID),
+		zap.String("song_id", job.SongID),
+		zap.String("title", editable.Title),
+		zap.String("artist", editable.Artist),
+		zap.String("album", editable.Album),
+		zap.Bool("has_cover", len(coverData) > 0),
+		zap.Bool("has_lyrics", editable.Lyrics != ""))
 
 	if err := t.tagger.WriteTags(filePath, trackMetadata); err != nil {
 		t.repo.MarkFailed(job.ID, err)
@@ -135,5 +149,11 @@ func (t *MetadataApplyTask) ProcessJob(ctx context.Context, job *model.MetadataJ
 	if err := t.repo.MarkDone(job.ID, filePath, scanMessage); err != nil {
 		return fmt.Errorf("mark metadata job done failed: %w", err)
 	}
+	t.logger.Info("metadata apply job completed",
+		zap.String("job_id", job.ID),
+		zap.String("song_id", job.SongID),
+		zap.String("path", filePath),
+		zap.String("message", scanMessage),
+		zap.Duration("elapsed", time.Since(startedAt)))
 	return nil
 }

@@ -361,9 +361,18 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	var coverData []byte
 
 	var gdMeta *gdstudio.MetadataResult
+	metadataStartedAt := time.Now()
+	metadataAttempts := 0
+	t.logger.Info("gdmusic track metadata lookup started",
+		zap.String("job_id", payload.JobID),
+		zap.String("source", payload.Source),
+		zap.String("track_id", payload.TrackID),
+		zap.Duration("retry_window", gdstudio.MetadataRetryMaxElapsed))
 	err = gdstudio.RetryMetadata(
 		ctx,
 		func(metadataCtx context.Context) error {
+			metadataAttempts++
+			attemptStartedAt := time.Now()
 			resolved, lookupErr := t.gdClient.ResolveMetadataContext(
 				metadataCtx,
 				payload.Source,
@@ -372,10 +381,25 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 				job.Artist,
 			)
 			if lookupErr != nil {
+				t.logger.Warn("gdmusic track metadata attempt failed",
+					zap.String("job_id", payload.JobID),
+					zap.String("source", payload.Source),
+					zap.String("track_id", payload.TrackID),
+					zap.Int("attempt", metadataAttempts),
+					zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
+					zap.Error(lookupErr))
 				return lookupErr
 			}
 			if resolved == nil {
-				return fmt.Errorf("gdmusic returned empty metadata")
+				emptyErr := fmt.Errorf("gdmusic returned empty metadata")
+				t.logger.Warn("gdmusic track metadata attempt failed",
+					zap.String("job_id", payload.JobID),
+					zap.String("source", payload.Source),
+					zap.String("track_id", payload.TrackID),
+					zap.Int("attempt", metadataAttempts),
+					zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
+					zap.Error(emptyErr))
+				return emptyErr
 			}
 			gdMeta = resolved
 			return nil
@@ -384,6 +408,15 @@ func (t *DownloadTask) stageTagging(ctx context.Context, payload *DownloadPayloa
 	if err != nil {
 		return fmt.Errorf("gdmusic metadata lookup failed after retrying for up to %s: %w", gdstudio.MetadataRetryMaxElapsed, err)
 	}
+	t.logger.Info("gdmusic track metadata lookup succeeded",
+		zap.String("job_id", payload.JobID),
+		zap.String("source", payload.Source),
+		zap.String("track_id", payload.TrackID),
+		zap.Int("attempts", metadataAttempts),
+		zap.Duration("elapsed", time.Since(metadataStartedAt)),
+		zap.String("title", gdMeta.Title),
+		zap.String("artist", gdMeta.Artist),
+		zap.String("album", gdMeta.Album))
 
 	applyGDMetadata(job, gdMeta)
 	if gdMeta.PicID != "" {
