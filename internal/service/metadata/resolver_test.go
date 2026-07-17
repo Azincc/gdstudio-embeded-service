@@ -62,8 +62,14 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
+		if got := req.URL.Query().Get("name"); got != "Example Song - Example Album - Requested Artist" {
+			t.Errorf("unexpected search query: %q", got)
+		}
+		if got := req.URL.Query().Get("count"); got != "10" {
+			t.Errorf("unexpected search count: %q", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"candidate-1","name":"Example Song","artist":"Example Artist","album":"Example Album","trackNumber":1,"year":2024}]`))
+		_, _ = w.Write([]byte(`[{"id":"candidate-1","name":"Example Song","artist":"Different Artist","album":"Example Album","trackNumber":1,"year":2024},{"id":"candidate-2","name":"Example Song (Live)","artist":"Another Artist","album":"Live Album"}]`))
 	}))
 	defer server.Close()
 
@@ -85,7 +91,7 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	)
 
 	var statuses []string
-	response, resolvedPath, err := resolver.ResolveCandidates(
+	response, resolvedPath, err := resolver.ResolveCandidatesWithSearch(
 		context.Background(),
 		model.SongMetadataReference{
 			ID:     "song-1",
@@ -93,6 +99,12 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 			Title:  "Example Song",
 			Artist: "Example Artist",
 			Album:  "Example Album",
+		},
+		model.MetadataSearchOptions{
+			Dimensions: []string{"title", "album", "artist"},
+			Title:      "Example Song",
+			Album:      "Example Album",
+			Artist:     "Requested Artist",
 		},
 		func(status, _ string) {
 			statuses = append(statuses, status)
@@ -110,14 +122,17 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	if response.Current.Title != "Example Song" || response.Current.Artist != "Example Artist" {
 		t.Fatalf("unexpected current metadata: %+v", response.Current)
 	}
-	if len(response.Candidates) != 2 {
-		t.Fatalf("expected two source candidates, got %#v", response.Candidates)
+	if len(response.Candidates) != 4 {
+		t.Fatalf("expected two results from each source, got %#v", response.Candidates)
 	}
 	if response.Candidates[0].Source != "gdstudio_netease" {
 		t.Fatalf("unexpected first candidate source: %q", response.Candidates[0].Source)
 	}
-	if response.Candidates[1].Source != "gdstudio_kuwo" {
-		t.Fatalf("unexpected second candidate source: %q", response.Candidates[1].Source)
+	if response.Candidates[0].TrackID != "candidate-1" || response.Candidates[0].Metadata.Artist != "Different Artist" {
+		t.Fatalf("explicit search result was filtered or remapped: %#v", response.Candidates[0])
+	}
+	if response.Candidates[2].Source != "gdstudio_kuwo" {
+		t.Fatalf("unexpected third candidate source: %q", response.Candidates[2].Source)
 	}
 	if got := observedLogs.FilterMessage("metadata candidate source lookup succeeded").Len(); got != 2 {
 		t.Fatalf("expected two source success logs, got %d", got)
@@ -140,16 +155,65 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	}
 }
 
-func TestResolveCandidatesTreatsNoMatchAsSuccessfulEmptyResult(t *testing.T) {
+func TestBuildMetadataSearchQueryUsesSelectedDimensionsInStableOrder(t *testing.T) {
+	tests := []struct {
+		name   string
+		search model.MetadataSearchOptions
+		want   string
+	}{
+		{
+			name: "title only",
+			search: model.MetadataSearchOptions{
+				Dimensions: []string{"title"},
+				Title:      "Slow Down",
+			},
+			want: "Slow Down",
+		},
+		{
+			name: "title and artist",
+			search: model.MetadataSearchOptions{
+				Dimensions: []string{"artist", "title"},
+				Title:      "Slow Down",
+				Artist:     "雷米克斯, Settle一虾子",
+			},
+			want: "Slow Down - 雷米克斯, Settle一虾子",
+		},
+		{
+			name: "all dimensions",
+			search: model.MetadataSearchOptions{
+				Dimensions: []string{"artist", "album", "title"},
+				Title:      "Slow Down",
+				Album:      "Slow Down",
+				Artist:     "Keb’ Mo’",
+			},
+			want: "Slow Down - Slow Down - Keb’ Mo’",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildMetadataSearchQuery(tt.search)
+			if err != nil {
+				t.Fatalf("buildMetadataSearchQuery returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("unexpected query: got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveCandidatesWithoutDimensionsOnlyReadsCurrentMetadata(t *testing.T) {
 	musicDir := t.TempDir()
 	audioPath := filepath.Join(musicDir, "song.ogg")
 	if err := os.WriteFile(audioPath, []byte("stub"), 0600); err != nil {
 		t.Fatalf("write temp audio file failed: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"unrelated","name":"Another Song","artist":"Other Artist","album":"Other Album"}]`))
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "search should not be called", http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
@@ -165,29 +229,30 @@ func TestResolveCandidatesTreatsNoMatchAsSuccessfulEmptyResult(t *testing.T) {
 		logger,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	response, _, err := resolver.ResolveCandidates(
-		ctx,
+		context.Background(),
 		model.SongMetadataReference{
-			ID:     "song-no-match",
+			ID:     "song-current-only",
 			Path:   "song.ogg",
-			Title:  "Missing Song",
-			Artist: "Missing Artist",
+			Title:  "Current Song",
+			Artist: "Current Artist",
 		},
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("expected no-match lookup to succeed, got %v", err)
+		t.Fatalf("expected current-only lookup to succeed, got %v", err)
 	}
 	if response == nil || len(response.Candidates) != 0 {
 		t.Fatalf("expected empty candidates, got %#v", response)
 	}
-	if got := observedLogs.FilterMessage("metadata candidate source completed without match").Len(); got != 2 {
-		t.Fatalf("expected two no-match completion logs, got %d", got)
+	if response.Current.Title != "Current Song" || response.Current.Artist != "Current Artist" {
+		t.Fatalf("unexpected current metadata: %#v", response.Current)
 	}
-	if got := observedLogs.FilterMessage("metadata candidate source attempt failed").Len(); got != 0 {
-		t.Fatalf("expected no warning attempts for no-match results, got %d", got)
+	if requests.Load() != 0 {
+		t.Fatalf("expected no GDMusic requests, got %d", requests.Load())
+	}
+	if got := observedLogs.FilterMessage("metadata candidate source lookup started").Len(); got != 0 {
+		t.Fatalf("expected no source lookup logs, got %d", got)
 	}
 }
 
@@ -219,13 +284,18 @@ func TestResolveCandidatesRetriesEmptyListsUntilContextExpires(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	response, _, err := resolver.ResolveCandidates(
+	response, _, err := resolver.ResolveCandidatesWithSearch(
 		ctx,
 		model.SongMetadataReference{
 			ID:     "song-empty-response",
 			Path:   "song.ogg",
 			Title:  "Missing Song",
 			Artist: "Missing Artist",
+		},
+		model.MetadataSearchOptions{
+			Dimensions: []string{"title", "artist"},
+			Title:      "Missing Song",
+			Artist:     "Missing Artist",
 		},
 		nil,
 	)
@@ -235,7 +305,7 @@ func TestResolveCandidatesRetriesEmptyListsUntilContextExpires(t *testing.T) {
 	if response != nil {
 		t.Fatalf("expected no candidate response for repeated empty lists, got %#v", response)
 	}
-	if requests.Load() <= 4 {
+	if requests.Load() <= 2 {
 		t.Fatalf("expected empty lists to trigger another attempt, got %d requests", requests.Load())
 	}
 }
@@ -244,9 +314,11 @@ func TestCollectSourceLookupResultsPreservesSuccessfulSource(t *testing.T) {
 	resultCh := make(chan sourceLookupResult, 2)
 	resultCh <- sourceLookupResult{
 		source: "netease",
-		metadata: &gdstudio.MetadataResult{
-			Title:  "Found Song",
-			Artist: "Found Artist",
+		metadata: []*gdstudio.MetadataResult{
+			{
+				Title:  "Found Song",
+				Artist: "Found Artist",
+			},
 		},
 	}
 	resultCh <- sourceLookupResult{
@@ -261,7 +333,7 @@ func TestCollectSourceLookupResultsPreservesSuccessfulSource(t *testing.T) {
 	if len(lookupErrors) != 1 {
 		t.Fatalf("expected one source error, got %#v", lookupErrors)
 	}
-	if resolved["netease"] == nil || resolved["netease"].Title != "Found Song" {
+	if len(resolved["netease"]) != 1 || resolved["netease"][0].Title != "Found Song" {
 		t.Fatalf("successful source result was not preserved: %#v", resolved)
 	}
 }

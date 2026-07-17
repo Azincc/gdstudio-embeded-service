@@ -64,6 +64,7 @@ type LyricResult struct {
 
 // MetadataResult GDStudio 搜索返回的可写元数据。
 type MetadataResult struct {
+	TrackID     string
 	Title       string
 	Artist      string
 	Album       string
@@ -92,7 +93,7 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		items, err := c.searchTracks(ctx, source, keyword)
+		items, err := c.searchTracks(ctx, source, keyword, 20)
 		if err != nil {
 			lastErr = err
 			continue
@@ -127,6 +128,60 @@ func (c *Client) ResolveMetadataContext(ctx context.Context, source, trackID, ti
 		return nil, ErrMetadataNotFound
 	}
 	return nil, ErrMetadataEmptyResponse
+}
+
+// SearchMetadataContext returns the raw metadata search results in source
+// order. Explicit user searches intentionally do not apply fuzzy matching or
+// discard results whose artist differs from the current file tags.
+func (c *Client) SearchMetadataContext(
+	ctx context.Context,
+	source string,
+	query string,
+	count int,
+) ([]*MetadataResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("search query is empty")
+	}
+	if count <= 0 {
+		count = 10
+	}
+	if count > 50 {
+		count = 50
+	}
+
+	items, err := c.searchTracks(ctx, source, query, count)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, ErrMetadataEmptyResponse
+	}
+
+	results := make([]*MetadataResult, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		metadata := metadataFromSearchItem(item)
+		if metadata == nil || (metadata.Title == "" && metadata.Artist == "" && metadata.Album == "") {
+			continue
+		}
+		key := metadata.TrackID
+		if key == "" {
+			key = strings.Join([]string{metadata.Title, metadata.Artist, metadata.Album}, "\x00")
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		results = append(results, metadata)
+		if len(results) >= count {
+			break
+		}
+	}
+	if len(results) == 0 {
+		return nil, ErrMetadataEmptyResponse
+	}
+	return results, nil
 }
 
 // ResolveAuxIDs 通过搜索结果反查 pic_id / lyric_id。
@@ -537,14 +592,12 @@ func buildSearchKeywords(trackID, title, artist string) []string {
 	seen := map[string]struct{}{}
 
 	title = strings.TrimSpace(title)
-	artist = strings.TrimSpace(artist)
+	artist = normalizeSearchArtist(artist)
 	trackID = strings.TrimSpace(trackID)
 
 	firstArtist := artist
-	for _, sep := range []string{"/", ",", ";", "、"} {
-		if idx := strings.Index(firstArtist, sep); idx >= 0 {
-			firstArtist = strings.TrimSpace(firstArtist[:idx])
-		}
+	if artists := splitSearchArtists(artist); len(artists) > 0 {
+		firstArtist = artists[0]
 	}
 
 	if title != "" && firstArtist != "" {
@@ -556,8 +609,11 @@ func buildSearchKeywords(trackID, title, artist string) []string {
 	return out
 }
 
-func (c *Client) searchTracks(ctx context.Context, source, keyword string) ([]map[string]interface{}, error) {
+func (c *Client) searchTracks(ctx context.Context, source, keyword string, count int) ([]map[string]interface{}, error) {
 	baseURL := c.selectBaseURL(source)
+	if count <= 0 {
+		count = 20
+	}
 
 	var result []map[string]interface{}
 	resp, err := c.client.R().
@@ -566,7 +622,7 @@ func (c *Client) searchTracks(ctx context.Context, source, keyword string) ([]ma
 			"types":  "search",
 			"source": source,
 			"name":   keyword,
-			"count":  "20",
+			"count":  strconv.Itoa(count),
 			"pages":  "1",
 		}).
 		SetResult(&result).
@@ -592,7 +648,7 @@ func pickAuxIDs(items []map[string]interface{}, trackID, title, artist string) (
 
 func pickMetadata(items []map[string]interface{}, trackID, title, artist string) (*MetadataResult, bool) {
 	normalizedTitle := strings.TrimSpace(title)
-	normalizedArtist := strings.TrimSpace(artist)
+	normalizedArtist := normalizeSearchArtist(artist)
 
 	// 1) 优先按 track_id 精确匹配。
 	for _, item := range items {
@@ -615,19 +671,8 @@ func pickMetadata(items []map[string]interface{}, trackID, title, artist string)
 			}
 			// 同时校验艺术家（至少有部分匹配），避免同名歌曲返回错误封面
 			if normalizedArtist != "" {
-				itemArtist := toString(item["artist"])
-				if itemArtist == "" {
-					// 尝试嵌套 artist 列表
-					if artists, ok := item["artist"].([]interface{}); ok && len(artists) > 0 {
-						if artistMap, ok := artists[0].(map[string]interface{}); ok {
-							itemArtist = toString(artistMap["name"])
-						}
-					}
-				}
-				if itemArtist != "" && !strings.Contains(
-					strings.ToLower(itemArtist), strings.ToLower(normalizedArtist)) &&
-					!strings.Contains(
-						strings.ToLower(normalizedArtist), strings.ToLower(itemArtist)) {
+				itemArtist := searchArtistName(item["artist"])
+				if itemArtist != "" && !searchArtistsMatch(normalizedArtist, itemArtist) {
 					continue
 				}
 			}
@@ -642,12 +687,75 @@ func pickMetadata(items []map[string]interface{}, trackID, title, artist string)
 	return nil, false
 }
 
+func normalizeSearchArtist(value string) string {
+	value = strings.ReplaceAll(value, "\x00", " / ")
+	return strings.TrimSpace(value)
+}
+
+func splitSearchArtists(value string) []string {
+	value = normalizeSearchArtist(value)
+	if value == "" {
+		return nil
+	}
+
+	parts := []string{value}
+	for _, separator := range []string{" / ", "、", ";", ","} {
+		var next []string
+		for _, part := range parts {
+			next = append(next, strings.Split(part, separator)...)
+		}
+		parts = next
+	}
+
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key := strings.ToLower(part)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func searchArtistsMatch(expected, actual string) bool {
+	expectedArtists := splitSearchArtists(expected)
+	actualArtists := splitSearchArtists(actual)
+	for _, left := range expectedArtists {
+		left = normalizeArtistMatchKey(left)
+		for _, right := range actualArtists {
+			right = normalizeArtistMatchKey(right)
+			if left == right || strings.Contains(left, right) || strings.Contains(right, left) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeArtistMatchKey(value string) string {
+	value = strings.NewReplacer(
+		"’", "'",
+		"‘", "'",
+		"`", "'",
+		"＇", "'",
+	).Replace(value)
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
 func metadataFromSearchItem(item map[string]interface{}) *MetadataResult {
 	if len(item) == 0 {
 		return nil
 	}
 
 	return &MetadataResult{
+		TrackID:     toString(item["id"]),
 		Title:       firstNonEmpty(toString(item["name"]), toString(item["title"])),
 		Artist:      searchArtistName(item["artist"]),
 		Album:       searchAlbumName(item["album"]),

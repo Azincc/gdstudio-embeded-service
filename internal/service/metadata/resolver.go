@@ -32,9 +32,11 @@ type Resolver struct {
 
 type sourceLookupResult struct {
 	source   string
-	metadata *gdstudio.MetadataResult
+	metadata []*gdstudio.MetadataResult
 	err      error
 }
+
+const metadataSearchResultLimit = 10
 
 func NewResolver(
 	cfg *config.Config,
@@ -90,6 +92,18 @@ func (r *Resolver) ResolveCandidates(
 	song model.SongMetadataReference,
 	progress func(status, message string),
 ) (*model.MetadataCandidatesResponse, string, error) {
+	return r.ResolveCandidatesWithSearch(ctx, song, model.MetadataSearchOptions{}, progress)
+}
+
+// ResolveCandidatesWithSearch reads the current file tags and, when the user
+// selected search dimensions, returns independent raw result lists from each
+// configured GDMusic source.
+func (r *Resolver) ResolveCandidatesWithSearch(
+	ctx context.Context,
+	song model.SongMetadataReference,
+	search model.MetadataSearchOptions,
+	progress func(status, message string),
+) (*model.MetadataCandidatesResponse, string, error) {
 	reportProgress := func(status, message string) {
 		if progress != nil {
 			progress(status, message)
@@ -101,7 +115,7 @@ func (r *Resolver) ResolveCandidates(
 		return nil, "", err
 	}
 
-	currentFallback := song.ToEditableMetadata()
+	currentFallback := sanitizeEditableMetadata(song.ToEditableMetadata())
 	current := currentFallback
 	if readCurrent, readErr := readCurrentMetadata(absolutePath); readErr != nil {
 		r.logger.Warn("failed to read current file tags, fallback to request",
@@ -110,6 +124,7 @@ func (r *Resolver) ResolveCandidates(
 	} else {
 		current = mergeMetadataFallback(readCurrent, currentFallback)
 	}
+	current = sanitizeEditableMetadata(current)
 	if sidecarLyrics, sidecarErr := readSidecarLyrics(absolutePath); sidecarErr == nil {
 		current.Lyrics = preferCurrentLyrics(current.Lyrics, sidecarLyrics)
 	} else if !os.IsNotExist(sidecarErr) {
@@ -120,26 +135,35 @@ func (r *Resolver) ResolveCandidates(
 
 	candidates := make([]model.MetadataCandidate, 0, 4)
 	seen := map[string]struct{}{}
-	addCandidate := func(source string, confidence float64, metadata model.EditableMetadata) {
+	addCandidate := func(source, trackID string, metadata model.EditableMetadata) {
 		metadata = sanitizeEditableMetadata(metadata)
 		if metadata.Title == "" && metadata.Artist == "" && metadata.Album == "" {
 			return
 		}
-		key := source + "\x00" + candidateKey(metadata)
+		key := source + "\x00" + strings.TrimSpace(trackID) + "\x00" + candidateKey(metadata)
 		if _, ok := seen[key]; ok {
 			return
 		}
 		seen[key] = struct{}{}
 		candidates = append(candidates, model.MetadataCandidate{
-			Source:     source,
-			Confidence: confidence,
-			Metadata:   metadata,
+			Source:   source,
+			TrackID:  strings.TrimSpace(trackID),
+			Metadata: metadata,
 		})
 	}
 
-	lookupTitle := firstNonEmpty(current.Title, song.Title)
-	lookupArtist := firstNonEmpty(current.Artist, song.Artist)
-	lookupAlbum := firstNonEmpty(current.Album, song.Album)
+	query, err := buildMetadataSearchQuery(search)
+	if err != nil {
+		return nil, absolutePath, err
+	}
+	if query == "" {
+		reportProgress(model.MetadataCandidatesJobStatusMergingData, "")
+		return &model.MetadataCandidatesResponse{
+			Current:    sanitizeEditableMetadata(current),
+			Candidates: candidates,
+		}, absolutePath, nil
+	}
+
 	lookupStartedAt := time.Now()
 
 	reportProgress(model.MetadataCandidatesJobStatusSearchingSong, "")
@@ -154,29 +178,20 @@ func (r *Resolver) ResolveCandidates(
 		go func() {
 			sourceStartedAt := time.Now()
 			attempts := 0
-			notFound := false
-			var resolved *gdstudio.MetadataResult
+			var resolved []*gdstudio.MetadataResult
 			r.logger.Info("metadata candidate source lookup started",
 				zap.String("song_id", song.ID),
 				zap.String("source", source),
-				zap.String("title", lookupTitle),
-				zap.String("artist", lookupArtist),
+				zap.String("query", query),
+				zap.Strings("dimensions", search.Dimensions),
 				zap.Duration("retry_window", gdstudio.MetadataRetryMaxElapsed))
 			err := gdstudio.RetryMetadata(ctx, func(retryCtx context.Context) error {
 				attempts++
 				attemptStartedAt := time.Now()
-				gdMeta, lookupErr := r.gdClient.ResolveMetadataContext(
-					retryCtx,
-					source,
-					"",
-					lookupTitle,
-					lookupArtist,
+				gdMeta, lookupErr := r.gdClient.SearchMetadataContext(
+					retryCtx, source, query, metadataSearchResultLimit,
 				)
 				if lookupErr != nil {
-					if errors.Is(lookupErr, gdstudio.ErrMetadataNotFound) {
-						notFound = true
-						return nil
-					}
 					r.logger.Warn("metadata candidate source attempt failed",
 						zap.String("song_id", song.ID),
 						zap.String("source", source),
@@ -184,10 +199,6 @@ func (r *Resolver) ResolveCandidates(
 						zap.Duration("attempt_duration", time.Since(attemptStartedAt)),
 						zap.Error(lookupErr))
 					return lookupErr
-				}
-				if gdMeta == nil {
-					notFound = true
-					return nil
 				}
 				resolved = gdMeta
 				return nil
@@ -199,21 +210,13 @@ func (r *Resolver) ResolveCandidates(
 					zap.Int("attempts", attempts),
 					zap.Duration("elapsed", time.Since(sourceStartedAt)),
 					zap.Error(err))
-			} else if notFound {
-				r.logger.Info("metadata candidate source completed without match",
-					zap.String("song_id", song.ID),
-					zap.String("source", source),
-					zap.Int("attempts", attempts),
-					zap.Duration("elapsed", time.Since(sourceStartedAt)))
 			} else {
 				r.logger.Info("metadata candidate source lookup succeeded",
 					zap.String("song_id", song.ID),
 					zap.String("source", source),
 					zap.Int("attempts", attempts),
 					zap.Duration("elapsed", time.Since(sourceStartedAt)),
-					zap.String("title", resolved.Title),
-					zap.String("artist", resolved.Artist),
-					zap.String("album", resolved.Album))
+					zap.Int("result_count", len(resolved)))
 			}
 			resultCh <- sourceLookupResult{
 				source:   source,
@@ -243,30 +246,19 @@ func (r *Resolver) ResolveCandidates(
 	}
 
 	for _, source := range candidateSources {
-		gdMeta := resolvedBySource[source]
-		if gdMeta == nil {
-			continue
-		}
-		editable := model.EditableMetadata{
-			Title:       firstNonEmpty(gdMeta.Title, lookupTitle),
-			Artist:      firstNonEmpty(gdMeta.Artist, lookupArtist),
-			Album:       firstNonEmpty(gdMeta.Album, lookupAlbum),
-			AlbumArtist: firstNonEmpty(gdMeta.Artist, lookupArtist),
-			TrackNumber: gdMeta.TrackNumber,
-			Year:        gdMeta.Year,
-		}
-		if gdMeta.PicID != "" {
-			if coverURL, coverErr := r.gdClient.ResolveCoverContext(ctx, source, gdMeta.PicID); coverErr == nil {
-				editable.CoverURL = coverURL
+		for _, gdMeta := range resolvedBySource[source] {
+			if gdMeta == nil {
+				continue
 			}
+			addCandidate("gdstudio_"+source, gdMeta.TrackID, model.EditableMetadata{
+				Title:       gdMeta.Title,
+				Artist:      gdMeta.Artist,
+				Album:       gdMeta.Album,
+				AlbumArtist: gdMeta.Artist,
+				TrackNumber: gdMeta.TrackNumber,
+				Year:        gdMeta.Year,
+			})
 		}
-		if gdMeta.LyricID != "" {
-			if lyricResult, lyricErr := r.gdClient.ResolveLyricsContext(ctx, source, gdMeta.LyricID); lyricErr == nil && lyricResult != nil {
-				editable.Lyrics = lyricResult.Lyric
-			}
-		}
-
-		addCandidate("gdstudio_"+source, 0.76, editable)
 	}
 	r.logger.Info("metadata candidate sources resolved",
 		zap.String("song_id", song.ID),
@@ -280,11 +272,57 @@ func (r *Resolver) ResolveCandidates(
 	}, absolutePath, nil
 }
 
+func buildMetadataSearchQuery(search model.MetadataSearchOptions) (string, error) {
+	selected := make(map[string]struct{}, len(search.Dimensions))
+	for _, rawDimension := range search.Dimensions {
+		dimension := strings.ToLower(strings.TrimSpace(rawDimension))
+		switch dimension {
+		case "title", "album", "artist":
+			selected[dimension] = struct{}{}
+		case "":
+			continue
+		default:
+			return "", fmt.Errorf("unsupported metadata search dimension: %s", rawDimension)
+		}
+	}
+
+	parts := make([]string, 0, 3)
+	appendSelected := func(dimension, rawValue string) error {
+		if _, ok := selected[dimension]; !ok {
+			return nil
+		}
+		value := strings.TrimSpace(rawValue)
+		if dimension == "artist" {
+			value = normalizeArtistValue(value)
+		}
+		if value == "" {
+			return fmt.Errorf("metadata search %s is empty", dimension)
+		}
+		parts = append(parts, value)
+		return nil
+	}
+	if err := appendSelected("title", search.Title); err != nil {
+		return "", err
+	}
+	if err := appendSelected("album", search.Album); err != nil {
+		return "", err
+	}
+	if err := appendSelected("artist", search.Artist); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, " - "), nil
+}
+
+func normalizeArtistValue(value string) string {
+	value = strings.ReplaceAll(value, "\x00", " / ")
+	return strings.TrimSpace(value)
+}
+
 func collectSourceLookupResults(
 	resultCh <-chan sourceLookupResult,
 	count int,
-) (map[string]*gdstudio.MetadataResult, []error, int) {
-	resolvedBySource := make(map[string]*gdstudio.MetadataResult, count)
+) (map[string][]*gdstudio.MetadataResult, []error, int) {
+	resolvedBySource := make(map[string][]*gdstudio.MetadataResult, count)
 	lookupErrors := make([]error, 0, count)
 	successfulLookups := 0
 	for i := 0; i < count; i++ {
@@ -343,9 +381,9 @@ func (r *Resolver) DownloadCover(ctx context.Context, rawURL string) ([]byte, er
 
 func sanitizeEditableMetadata(metadata model.EditableMetadata) model.EditableMetadata {
 	metadata.Title = strings.TrimSpace(metadata.Title)
-	metadata.Artist = strings.TrimSpace(metadata.Artist)
+	metadata.Artist = normalizeArtistValue(metadata.Artist)
 	metadata.Album = strings.TrimSpace(metadata.Album)
-	metadata.AlbumArtist = strings.TrimSpace(metadata.AlbumArtist)
+	metadata.AlbumArtist = normalizeArtistValue(metadata.AlbumArtist)
 	metadata.Genre = strings.TrimSpace(metadata.Genre)
 	metadata.Lyrics = strings.TrimSpace(metadata.Lyrics)
 	metadata.CoverURL = strings.TrimSpace(metadata.CoverURL)

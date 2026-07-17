@@ -64,6 +64,64 @@ func TestPickMetadataPrefersExactTrackID(t *testing.T) {
 	}
 }
 
+func TestPickMetadataMatchesNullSeparatedArtistAgainstNestedArtists(t *testing.T) {
+	items := []map[string]interface{}{
+		{
+			"id":   "song-1",
+			"name": "Slow Down",
+			"artist": []interface{}{
+				map[string]interface{}{"name": "Keb’ Mo’"},
+			},
+			"album": map[string]interface{}{"name": "Slow Down"},
+		},
+	}
+
+	metadata, ok := pickMetadata(items, "", "Slow Down", "雷米克斯\x00Keb’ Mo’")
+	if !ok {
+		t.Fatal("expected a nested artist to match one value from a NUL-separated tag")
+	}
+	if metadata.Artist != "Keb’ Mo’" {
+		t.Fatalf("unexpected matched artist: %q", metadata.Artist)
+	}
+}
+
+func TestSearchMetadataContextReturnsRawResultsWithoutArtistFiltering(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.URL.Query().Get("name"); got != "Slow Down - 雷米克斯, Settle一虾子" {
+			t.Errorf("unexpected search query: %q", got)
+		}
+		if got := req.URL.Query().Get("count"); got != "2" {
+			t.Errorf("unexpected result count: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"15228380","name":"Slow Down","artist":"Keb' Mo'","album":"Slow Down"},{"id":"1741454","name":"Slow Down (Live)","artist":[{"name":"Different Artist"}],"album":{"name":"Live"}}]`))
+	}))
+	defer server.Close()
+
+	client := NewClient(&config.GDStudioConfig{
+		BaseURL: server.URL,
+		Timeout: time.Second,
+	}, zap.NewNop())
+	results, err := client.SearchMetadataContext(
+		context.Background(),
+		"kuwo",
+		"Slow Down - 雷米克斯, Settle一虾子",
+		2,
+	)
+	if err != nil {
+		t.Fatalf("SearchMetadataContext returned error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected both raw results, got %#v", results)
+	}
+	if results[0].TrackID != "15228380" || results[0].Artist != "Keb' Mo'" {
+		t.Fatalf("unexpected first result: %#v", results[0])
+	}
+	if results[1].TrackID != "1741454" || results[1].Artist != "Different Artist" {
+		t.Fatalf("unexpected second result: %#v", results[1])
+	}
+}
+
 func TestEmptySearchListIsRetriedAsTransientFailure(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

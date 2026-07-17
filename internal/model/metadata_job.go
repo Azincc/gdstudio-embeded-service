@@ -22,6 +22,15 @@ type SongMetadataReference struct {
 	LibraryID   string `json:"libraryId"`
 }
 
+// MetadataSearchOptions describes the fields explicitly selected by the user
+// for a metadata search. Dimensions may contain title, album, and artist.
+type MetadataSearchOptions struct {
+	Dimensions []string `json:"dimensions"`
+	Title      string   `json:"title"`
+	Album      string   `json:"album"`
+	Artist     string   `json:"artist"`
+}
+
 // EditableMetadata is the JSON payload exchanged with Echoes for metadata editing.
 type EditableMetadata struct {
 	Title       string `json:"title"`
@@ -55,6 +64,7 @@ func (r SongMetadataReference) ToEditableMetadata() EditableMetadata {
 // MetadataCandidate is a candidate option returned to Echoes.
 type MetadataCandidate struct {
 	Source     string           `json:"source"`
+	TrackID    string           `json:"track_id,omitempty"`
 	Confidence float64          `json:"confidence"`
 	Metadata   EditableMetadata `json:"metadata"`
 }

@@ -41,7 +41,8 @@ func NewMetadataHandler(
 }
 
 type MetadataCandidatesRequest struct {
-	Song model.SongMetadataReference `json:"song" binding:"required"`
+	Song   model.SongMetadataReference `json:"song" binding:"required"`
+	Search model.MetadataSearchOptions `json:"search"`
 }
 
 type MetadataApplyRequest struct {
@@ -60,7 +61,9 @@ func (h *MetadataHandler) Candidates(c *gin.Context) {
 		return
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(c.Request.Context(), req.Song, nil)
+	response, _, err := h.resolver.ResolveCandidatesWithSearch(
+		c.Request.Context(), req.Song, req.Search, nil,
+	)
 	if err != nil {
 		h.logger.Warn("resolve metadata candidates failed",
 			zap.String("song_id", req.Song.ID),
@@ -79,7 +82,7 @@ func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	requestJSON, err := json.Marshal(req.Song)
+	requestJSON, err := json.Marshal(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode metadata candidates request"})
 		return
@@ -106,7 +109,8 @@ func (h *MetadataHandler) CreateCandidatesJob(c *gin.Context) {
 		zap.String("library_id", job.LibraryID),
 		zap.String("path", job.SongPath),
 		zap.String("title", req.Song.Title),
-		zap.String("artist", req.Song.Artist))
+		zap.String("artist", req.Song.Artist),
+		zap.Strings("search_dimensions", req.Search.Dimensions))
 
 	c.JSON(http.StatusOK, gin.H{
 		"job_id": job.ID,
@@ -255,31 +259,46 @@ func (h *MetadataHandler) candidatesLoop(ctx context.Context, owner string, poll
 			continue
 		}
 
-		var song model.SongMetadataReference
+		var req MetadataCandidatesRequest
 		if strings.TrimSpace(job.RequestJSON) == "" {
-			song = model.SongMetadataReference{
+			req.Song = model.SongMetadataReference{
 				ID:        job.SongID,
 				Path:      job.SongPath,
 				LibraryID: job.LibraryID,
 			}
-		} else if err := json.Unmarshal([]byte(job.RequestJSON), &song); err != nil {
-			decodeErr := fmt.Errorf("decode metadata candidates request failed: %w", err)
-			if markErr := h.candidatesRepo.MarkFailed(job.ID, job.LeaseOwner, decodeErr); markErr != nil {
-				h.logger.Warn("mark invalid metadata candidates job failed",
-					zap.String("job_id", job.ID),
-					zap.Error(markErr))
+		} else {
+			if err := json.Unmarshal([]byte(job.RequestJSON), &req); err != nil || strings.TrimSpace(req.Song.Path) == "" {
+				// Jobs created by versions before explicit search stored the song
+				// object directly. Decode them as a current-metadata-only request.
+				var legacySong model.SongMetadataReference
+				if legacyErr := json.Unmarshal([]byte(job.RequestJSON), &legacySong); legacyErr != nil || strings.TrimSpace(legacySong.Path) == "" {
+					decodeCause := err
+					if decodeCause == nil {
+						decodeCause = legacyErr
+					}
+					if decodeCause == nil {
+						decodeCause = errors.New("song.path is empty")
+					}
+					decodeErr := fmt.Errorf("decode metadata candidates request failed: %w", decodeCause)
+					if markErr := h.candidatesRepo.MarkFailed(job.ID, job.LeaseOwner, decodeErr); markErr != nil {
+						h.logger.Warn("mark invalid metadata candidates job failed",
+							zap.String("job_id", job.ID),
+							zap.Error(markErr))
+					}
+					continue
+				}
+				req = MetadataCandidatesRequest{Song: legacySong}
 			}
-			continue
 		}
 
-		h.runCandidatesLeased(ctx, job, song)
+		h.runCandidatesLeased(ctx, job, req)
 	}
 }
 
 func (h *MetadataHandler) runCandidatesLeased(
 	ctx context.Context,
 	job *model.MetadataCandidatesJob,
-	song model.SongMetadataReference,
+	req MetadataCandidatesRequest,
 ) {
 	taskCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -304,7 +323,7 @@ func (h *MetadataHandler) runCandidatesLeased(
 		}
 	}()
 
-	h.processCandidatesJob(taskCtx, job, song)
+	h.processCandidatesJob(taskCtx, job, req)
 	close(done)
 	cancel()
 	if err := h.candidatesRepo.ReleaseLease(job.ID, job.LeaseOwner); err != nil {
@@ -317,8 +336,9 @@ func (h *MetadataHandler) runCandidatesLeased(
 func (h *MetadataHandler) processCandidatesJob(
 	ctx context.Context,
 	job *model.MetadataCandidatesJob,
-	song model.SongMetadataReference,
+	req MetadataCandidatesRequest,
 ) {
+	song := req.Song
 	jobID := job.ID
 	startedAt := time.Now()
 	h.logger.Info("metadata candidates job started",
@@ -326,6 +346,7 @@ func (h *MetadataHandler) processCandidatesJob(
 		zap.String("song_id", song.ID),
 		zap.String("title", song.Title),
 		zap.String("artist", song.Artist),
+		zap.Strings("search_dimensions", req.Search.Dimensions),
 		zap.Strings("sources", []string{"netease", "kuwo"}))
 
 	reportProgress := func(status, message string) {
@@ -341,7 +362,9 @@ func (h *MetadataHandler) processCandidatesJob(
 			zap.String("status", status))
 	}
 
-	response, _, err := h.resolver.ResolveCandidates(ctx, song, reportProgress)
+	response, _, err := h.resolver.ResolveCandidatesWithSearch(
+		ctx, song, req.Search, reportProgress,
+	)
 	if err != nil {
 		if ctx.Err() != nil || errors.Is(err, repository.ErrLeaseLost) {
 			h.logger.Info("metadata candidates job interrupted",
