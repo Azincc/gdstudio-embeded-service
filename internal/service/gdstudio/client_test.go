@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,6 +120,44 @@ func TestSearchMetadataContextReturnsRawResultsWithoutArtistFiltering(t *testing
 	}
 	if results[1].TrackID != "1741454" || results[1].Artist != "Different Artist" {
 		t.Fatalf("unexpected second result: %#v", results[1])
+	}
+}
+
+func TestResolveCoverPreviewContextFallsBackFrom500To300(t *testing.T) {
+	var sizes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.URL.Query().Get("types"); got != "pic" {
+			t.Errorf("unexpected request type: %q", got)
+		}
+		if got := req.URL.Query().Get("id"); got != "pic-1" {
+			t.Errorf("unexpected pic id: %q", got)
+		}
+		size := req.URL.Query().Get("size")
+		sizes = append(sizes, size)
+		w.Header().Set("Content-Type", "application/json")
+		if size == "500" {
+			_, _ = w.Write([]byte(`{"url":""}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"url":"https://img.test/pic-1-300.jpg"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(&config.GDStudioConfig{
+		BaseURL: server.URL,
+		Timeout: time.Second,
+	}, zap.NewNop())
+	coverURL, err := client.ResolveCoverPreviewContext(
+		context.Background(), "netease", "pic-1",
+	)
+	if err != nil {
+		t.Fatalf("ResolveCoverPreviewContext returned error: %v", err)
+	}
+	if coverURL != "https://img.test/pic-1-300.jpg" {
+		t.Fatalf("unexpected cover URL: %q", coverURL)
+	}
+	if got := strings.Join(sizes, ","); got != "500,300" {
+		t.Fatalf("unexpected size fallback order: %q", got)
 	}
 }
 

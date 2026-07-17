@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/azin/gdstudio-embed-service/internal/config"
@@ -36,7 +37,10 @@ type sourceLookupResult struct {
 	err      error
 }
 
-const metadataSearchResultLimit = 10
+const (
+	metadataSearchResultLimit      = 10
+	metadataCoverLookupConcurrency = 4
+)
 
 func NewResolver(
 	cfg *config.Config,
@@ -211,6 +215,7 @@ func (r *Resolver) ResolveCandidatesWithSearch(
 					zap.Duration("elapsed", time.Since(sourceStartedAt)),
 					zap.Error(err))
 			} else {
+				r.enrichCandidateCovers(ctx, song.ID, source, resolved)
 				r.logger.Info("metadata candidate source lookup succeeded",
 					zap.String("song_id", song.ID),
 					zap.String("source", source),
@@ -257,6 +262,7 @@ func (r *Resolver) ResolveCandidatesWithSearch(
 				AlbumArtist: gdMeta.Artist,
 				TrackNumber: gdMeta.TrackNumber,
 				Year:        gdMeta.Year,
+				CoverURL:    gdMeta.CoverURL,
 			})
 		}
 	}
@@ -270,6 +276,45 @@ func (r *Resolver) ResolveCandidatesWithSearch(
 		Current:    sanitizeEditableMetadata(current),
 		Candidates: candidates,
 	}, absolutePath, nil
+}
+
+func (r *Resolver) enrichCandidateCovers(
+	ctx context.Context,
+	songID string,
+	source string,
+	results []*gdstudio.MetadataResult,
+) {
+	semaphore := make(chan struct{}, metadataCoverLookupConcurrency)
+	var wg sync.WaitGroup
+	for _, result := range results {
+		if result == nil || strings.TrimSpace(result.PicID) == "" {
+			continue
+		}
+		result := result
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+
+			coverURL, err := r.gdClient.ResolveCoverPreviewContext(ctx, source, result.PicID)
+			if err != nil {
+				r.logger.Warn("metadata candidate cover lookup failed",
+					zap.String("song_id", songID),
+					zap.String("source", source),
+					zap.String("track_id", result.TrackID),
+					zap.String("pic_id", result.PicID),
+					zap.Error(err))
+				return
+			}
+			result.CoverURL = strings.TrimSpace(coverURL)
+		}()
+	}
+	wg.Wait()
 }
 
 func buildMetadataSearchQuery(search model.MetadataSearchOptions) (string, error) {

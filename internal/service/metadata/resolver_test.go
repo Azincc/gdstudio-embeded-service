@@ -58,7 +58,16 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Query().Get("types") != "search" {
+		switch req.URL.Query().Get("types") {
+		case "pic":
+			if got := req.URL.Query().Get("size"); got != "500" {
+				t.Errorf("unexpected cover size: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"url":"https://img.test/` + req.URL.Query().Get("id") + `.jpg"}`))
+			return
+		case "search":
+		default:
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
@@ -69,7 +78,7 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 			t.Errorf("unexpected search count: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"candidate-1","name":"Example Song","artist":"Different Artist","album":"Example Album","trackNumber":1,"year":2024},{"id":"candidate-2","name":"Example Song (Live)","artist":"Another Artist","album":"Live Album"}]`))
+		_, _ = w.Write([]byte(`[{"id":"candidate-1","name":"Example Song","artist":"Different Artist","album":"Example Album","trackNumber":1,"year":2024,"pic_id":"pic-1"},{"id":"candidate-2","name":"Example Song (Live)","artist":"Another Artist","album":"Live Album","pic_id":"pic-2"}]`))
 	}))
 	defer server.Close()
 
@@ -130,6 +139,9 @@ func TestResolveCandidatesReportsLookupStages(t *testing.T) {
 	}
 	if response.Candidates[0].TrackID != "candidate-1" || response.Candidates[0].Metadata.Artist != "Different Artist" {
 		t.Fatalf("explicit search result was filtered or remapped: %#v", response.Candidates[0])
+	}
+	if response.Candidates[0].Metadata.CoverURL != "https://img.test/pic-1.jpg" {
+		t.Fatalf("expected resolved cover URL, got %#v", response.Candidates[0])
 	}
 	if response.Candidates[2].Source != "gdstudio_kuwo" {
 		t.Fatalf("unexpected third candidate source: %q", response.Candidates[2].Source)

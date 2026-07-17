@@ -71,6 +71,7 @@ type MetadataResult struct {
 	TrackNumber int
 	Year        int
 	PicID       string
+	CoverURL    string
 	LyricID     string
 }
 
@@ -272,12 +273,26 @@ func (c *Client) ResolveCover(source, picID string) (string, error) {
 
 // ResolveCoverContext 解析封面，并支持取消请求。
 func (c *Client) ResolveCoverContext(ctx context.Context, source, picID string) (string, error) {
-	if picID == "" {
+	// 某些源对不同尺寸支持不一致，按尺寸回退尝试。
+	return c.resolveCoverWithSizesContext(ctx, source, picID, []int{1000, 640, 500, 300})
+}
+
+// ResolveCoverPreviewContext resolves the cover size supported by GDMusic's
+// search result flow. Prefer 500px and fall back to 300px.
+func (c *Client) ResolveCoverPreviewContext(ctx context.Context, source, picID string) (string, error) {
+	return c.resolveCoverWithSizesContext(ctx, source, picID, []int{500, 300})
+}
+
+func (c *Client) resolveCoverWithSizesContext(
+	ctx context.Context,
+	source string,
+	picID string,
+	sizes []int,
+) (string, error) {
+	if strings.TrimSpace(picID) == "" {
 		return "", nil
 	}
 
-	// 某些源对不同尺寸支持不一致，按尺寸回退尝试。
-	sizes := []int{1000, 640, 500, 300}
 	var lastErr error
 	for _, size := range sizes {
 		coverURL, err := c.resolveCoverWithSizeContext(ctx, source, picID, size)
